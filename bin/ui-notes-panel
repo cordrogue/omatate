@@ -1,0 +1,1636 @@
+#!/usr/bin/python3
+
+import os
+import sys
+
+_LAYER_SHELL = "/usr/lib/libgtk4-layer-shell.so"
+if os.path.exists(_LAYER_SHELL) and _LAYER_SHELL not in os.environ.get("LD_PRELOAD", ""):
+    # gi loads libwayland-client before gtk4-layer-shell can hook it; preload and re-exec.
+    os.environ["LD_PRELOAD"] = (os.environ.get("LD_PRELOAD", "") + " " + _LAYER_SHELL).strip()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+import gi
+
+import fcntl
+import json
+import shutil
+import socket
+import subprocess
+import time
+import tomllib
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+
+from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell, Pango
+
+
+# --- Omarchy theme resolution -------------------------------------------------
+#
+# Palette, font family and base size come from the live Omarchy theme. Every
+# lookup is best-effort: anything missing falls back to the hard-coded Gand
+# values below and logs a single stderr warning.
+
+FALLBACK_PALETTE = {
+    "background": "#3a332a",
+    "dark_background": "#2e2820",
+    "darker_background": "#241f19",
+    "lighter_background": "#463e33",
+    "foreground": "#f5ecd9",
+    "dark_foreground": "#b0a48f",
+    "muted": "#968872",
+    "accent": "#d6a06b",
+    "selection": "#514838",
+    "red": "#ed806b",
+    "yellow": "#dab46b",
+    "green": "#83baa1",
+    "blue": "#74accf",
+}
+FALLBACK_FONT = "JetBrainsMono Nerd Font"
+FALLBACK_BASE_SIZE = 11
+
+
+def _omarchy(*args):
+    try:
+        result = subprocess.run(
+            ["omarchy", *args],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        warn(f"cannot run omarchy {' '.join(args)}: {error}")
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def theme_slug(name=None):
+    if name is None:
+        name = _omarchy("theme", "current")
+    if not name:
+        return None
+    return name.strip().lower().replace(" ", "-")
+
+
+def _colors_path(name, slug):
+    candidates = [
+        os.path.expanduser(f"~/.config/omarchy/themes/{slug}/colors.toml"),
+        f"/usr/share/omarchy/themes/{slug}/colors.toml",
+    ]
+    directory = _omarchy("theme", "dir", name)
+    if directory:
+        candidates.append(os.path.join(directory, "colors.toml"))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _is_color(value):
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text.startswith("#") or len(text) not in (4, 7, 9):
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in text[1:])
+
+
+def resolve_palette():
+    palette = dict(FALLBACK_PALETTE)
+    name = _omarchy("theme", "current")
+    if not name:
+        warn("omarchy theme unknown; using built-in Gand palette")
+        return palette
+    slug = theme_slug(name)
+    path = _colors_path(name, slug)
+    if not path:
+        warn(f"no colors.toml for theme {slug!r}; using built-in Gand palette")
+        return palette
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
+        warn(f"cannot parse {path}: {error}; using built-in Gand palette")
+        return palette
+    for key in FALLBACK_PALETTE:
+        value = data.get(key)
+        if _is_color(value):
+            palette[key] = value.strip()
+    return palette
+
+
+def resolve_font():
+    family = _omarchy("font", "current") or FALLBACK_FONT
+    size = FALLBACK_BASE_SIZE
+    path = os.path.expanduser("~/.config/omarchy/shell.toml")
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+        candidate = data.get("font", {}).get("base-size")
+        if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
+            raise ValueError("base-size is not a number")
+        if not 6 <= float(candidate) <= 40:
+            raise ValueError(f"base-size {candidate} out of range")
+        size = float(candidate)
+    except FileNotFoundError:
+        pass
+    except (OSError, tomllib.TOMLDecodeError, ValueError, AttributeError) as error:
+        warn(f"cannot read font base-size from {path}: {error}; using {size}")
+    return family, size
+
+
+def resolve_theme():
+    palette = resolve_palette()
+    family, size = resolve_font()
+    return {"palette": palette, "font_family": family, "font_size": size}
+
+
+def rgba(color, alpha=1.0):
+    text = color.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(character * 2 for character in text)
+    text = text[:6].ljust(6, "0")
+    red = int(text[0:2], 16)
+    green = int(text[2:4], 16)
+    blue = int(text[4:6], 16)
+    if alpha >= 1.0:
+        return f"rgb({red}, {green}, {blue})"
+    return f"rgba({red}, {green}, {blue}, {alpha:g})"
+
+
+def build_css(theme):
+    colors = theme["palette"]
+    family = theme["font_family"].replace('"', "")
+    size = theme["font_size"]
+    size_text = f"{size:g}pt"
+
+    background = colors["background"]
+    lighter = colors["lighter_background"]
+    darker = colors["darker_background"]
+    foreground = colors["foreground"]
+    muted = colors["muted"]
+    accent = colors["accent"]
+
+    hairline = rgba(foreground, 0.25)
+    small_text = f"{size * 0.82:g}pt"
+
+    return f"""
+.panel, .panel * {{
+  font-family: "{family}", monospace;
+  font-size: {size_text};
+}}
+.panel {{
+  background-color: {rgba(background, 1.0)};
+  border: 1px solid {hairline};
+  border-radius: 0;
+  color: {foreground};
+  padding: 6px;
+}}
+.panel-header {{
+  min-height: 22px;
+  padding: 0;
+}}
+.entry-card {{
+  background-color: {lighter};
+  border: 1px solid {hairline};
+  border-left: 2px solid {muted};
+  border-radius: 0;
+  padding: 5px;
+}}
+.entry-card.status-recording {{ border-left-color: {colors["red"]}; }}
+.entry-card.status-transcribing {{ border-left-color: {colors["yellow"]}; }}
+.entry-card.status-analyzing {{ border-left-color: {colors["yellow"]}; }}
+.entry-card.status-done {{ border-left-color: {colors["green"]}; }}
+.entry-card.status-no-transcript {{ border-left-color: {muted}; }}
+.entry-card.status-context-error {{ border-left-color: {colors["red"]}; }}
+.context-title {{
+  color: {muted};
+  font-size: {small_text};
+}}
+.section-row {{
+  border-bottom: 1px solid {hairline};
+  padding: 2px 0;
+}}
+.section-title {{
+  background-color: transparent;
+  background-image: none;
+  border: 1px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  caret-color: {accent};
+  color: {foreground};
+  min-height: 20px;
+  outline: none;
+  padding: 0 2px;
+}}
+.section-title > text {{
+  background-color: transparent;
+  color: {foreground};
+}}
+.section-title > text selection {{
+  background-color: {colors["selection"]};
+  color: {foreground};
+}}
+.section-title:focus, .section-title:focus-within {{
+  border-color: {accent};
+}}
+.section-delete {{
+  border-color: transparent;
+  min-height: 18px;
+  min-width: 18px;
+  padding: 0 2px;
+}}
+.section-delete:hover {{
+  border-color: {hairline};
+}}
+.section-delete.hover-hidden {{
+  opacity: 0;
+}}
+.transcript-editor {{
+  background-color: {darker};
+  border: 1px solid transparent;
+  border-radius: 0;
+  color: {foreground};
+  padding: 3px;
+  caret-color: {accent};
+}}
+.transcript-placeholder {{
+  color: {muted};
+  padding: 4px;
+}}
+.transcript-editor text {{
+  background-color: transparent;
+  color: {foreground};
+}}
+.transcript-editor text selection {{
+  background-color: {colors["selection"]};
+  color: {foreground};
+}}
+.transcript-editor:focus-within {{
+  border-color: {accent};
+}}
+.empty-state {{
+  color: {muted};
+  padding: 4px 0;
+}}
+button {{
+  background-image: none;
+  background-color: transparent;
+  border: 1px solid {hairline};
+  border-radius: 0;
+  box-shadow: none;
+  color: {muted};
+  min-height: 22px;
+  min-width: 22px;
+  padding: 0 4px;
+  text-shadow: none;
+}}
+button:hover {{
+  background-color: {rgba(foreground, 0.08)};
+  color: {foreground};
+}}
+button:active {{
+  background-color: {rgba(foreground, 0.14)};
+}}
+button:focus, button:focus-visible {{
+  border-color: {accent};
+  outline: none;
+}}
+scrollbar {{
+  background-color: transparent;
+}}
+scrollbar slider {{
+  background-color: {rgba(foreground, 0.28)};
+  border-radius: 0;
+}}
+scrollbar slider:hover {{
+  background-color: {rgba(foreground, 0.42)};
+}}
+.status-label {{
+  color: {muted};
+  font-size: {small_text};
+}}
+.ai-toggle.ai-on {{
+  color: {accent};
+}}
+.ai-toggle.ai-off {{
+  color: {muted};
+}}
+.ai-toggle:checked {{
+  background-color: transparent;
+  background-image: none;
+}}
+.ai-toggle:checked:hover {{
+  background-color: {rgba(foreground, 0.08)};
+}}
+.shot-popup {{
+  background-color: {rgba(background, 1.0)};
+  border: 1px solid {hairline};
+  border-radius: 0;
+  opacity: 1;
+  padding: 0;
+  transition: opacity 300ms ease;
+}}
+.shot-popup.faded {{
+  opacity: 0;
+}}
+""".encode()
+
+
+DATA_SUBDIR = ".data"
+ENTRIES_READ_FAILED = object()
+
+# Nerd Font glyphs: nf-md-creation, nf-md-plus, nf-md-folder and nf-md-close.
+# The header carries no text.
+GLYPH_AI = "\U000f0674"
+GLYPH_PLUS = "\U000f0415"
+GLYPH_FOLDER = "\U000f024b"
+GLYPH_CLOSE = "\U000f0156"
+EMPTY_TEXT = "no session"
+
+PANEL_WIDTH = 320
+PANEL_MARGIN = 12
+LIST_MAX_FRACTION = 0.70
+LIST_MAX_FALLBACK = 560
+LIST_MIN_HEIGHT = 40
+
+# The transcript editor is one line tall while empty and grows with its text.
+EDITOR_MIN_HEIGHT = 34
+EDITOR_MAX_HEIGHT = 120
+# A section that arrives this long after the panel opened was made by the user,
+# so its title is focused for typing; startup loads never steal focus.
+NEW_SECTION_FOCUS_DELAY = 2.0
+
+# Screenshot popup: sits immediately left of the panel, fades out after a beat.
+SHOT_WIDTH = 360
+SHOT_HEIGHT = 225
+SHOT_RIGHT_MARGIN = PANEL_WIDTH + 24
+SHOT_VISIBLE_MS = 4000
+SHOT_FADE_MS = 300
+
+
+def warn(message):
+    print(f"ui-notes-panel: {message}", file=sys.stderr, flush=True)
+
+
+def runtime_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not base:
+        base = f"/tmp/ui-notes-{os.getuid()}"
+    return os.path.join(base, "ui-notes")
+
+
+def ai_config_path():
+    return os.path.expanduser("~/.config/ui-notes/ai")
+
+
+def read_ai_enabled():
+    """AI is on unless the config file says exactly `off`; missing = on."""
+    try:
+        with open(ai_config_path(), encoding="utf-8") as handle:
+            value = handle.read(64).strip().lower()
+    except (OSError, UnicodeError):
+        return True
+    return value != "off"
+
+
+def resolve_ui_notes():
+    command = shutil.which("ui-notes")
+    if command is not None:
+        return command
+    sibling = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui-notes")
+    if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+        return sibling
+    return None
+
+
+def _ignore_child_exit(_pid, _status):
+    pass
+
+
+def spawn_detached(argv):
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    GLib.child_watch_add(GLib.PRIORITY_DEFAULT, process.pid, _ignore_child_exit)
+    return process
+
+
+class EntryCard:
+    # A muted hint drawn over an empty editor (GtkTextView has no placeholder).
+    PLACEHOLDERS = {
+        "recording": "listening…",
+        "transcribing": "transcribing…",
+        "no-transcript": "no transcript",
+    }
+
+    STATUS_CLASSES = (
+        "status-recording",
+        "status-transcribing",
+        "status-analyzing",
+        "status-done",
+        "status-no-transcript",
+        "status-context-error",
+    )
+
+    def __init__(self, panel, record):
+        self.panel = panel
+        self.entry_id = record["id"]
+        self.record = record
+        self.plain = is_plain_entry(record)
+        self.widget_kind = widget_kind(record)
+        self.dirty = False
+        self.suppress_buffer_change = False
+        self.save_source = None
+        self.placeholder_text = ""
+
+        self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.root.add_css_class("entry-card")
+
+        # A plain entry (AI off) has no context, so it gets no title row: just
+        # the stripe, the transient status word and the transcript editor.
+        self.heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        if self.plain:
+            self.title_label = None
+        else:
+            self.title_label = Gtk.Label(xalign=0, hexpand=True)
+            self.title_label.set_valign(Gtk.Align.START)
+            self.title_label.set_wrap(True)
+            self.title_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            self.title_label.set_lines(2)
+            self.title_label.set_ellipsize(Pango.EllipsizeMode.END)
+            self.title_label.add_css_class("context-title")
+            self.heading.append(self.title_label)
+
+        self.status_label = Gtk.Label(xalign=0 if self.plain else 1)
+        self.status_label.set_hexpand(self.plain)
+        self.status_label.set_valign(Gtk.Align.START)
+        self.status_label.add_css_class("status-label")
+        self.heading.append(self.status_label)
+        self.root.append(self.heading)
+
+        self.editor_scroll = Gtk.ScrolledWindow()
+        self.editor_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.editor_scroll.set_min_content_height(0)
+        self.editor_scroll.set_max_content_height(EDITOR_MAX_HEIGHT)
+        self.editor_scroll.set_propagate_natural_height(True)
+        self.text_view = Gtk.TextView()
+        self.text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.text_view.set_accepts_tab(False)
+        self.text_view.add_css_class("transcript-editor")
+        self.buffer = self.text_view.get_buffer()
+        self.buffer.connect("changed", self._on_buffer_changed)
+        self.text_view.connect("notify::has-focus", self._on_editor_focus)
+        self.editor_scroll.set_child(self.text_view)
+        # GtkTextView has no placeholder property: float a muted label on top
+        # of the editor and drop it as soon as there is text or a caret.
+        self.placeholder = Gtk.Label(xalign=0)
+        self.placeholder.set_halign(Gtk.Align.START)
+        self.placeholder.set_valign(Gtk.Align.START)
+        self.placeholder.set_can_target(False)
+        self.placeholder.add_css_class("transcript-placeholder")
+        editor_overlay = Gtk.Overlay()
+        editor_overlay.set_child(self.editor_scroll)
+        editor_overlay.add_overlay(self.placeholder)
+        self.root.append(editor_overlay)
+
+        self.update(record, initial=True)
+
+    def _on_editor_focus(self, _view, _param):
+        self._sync_placeholder()
+
+    def _sync_placeholder(self):
+        """An empty editor is one line tall and carries a muted hint."""
+        start, end = self.buffer.get_bounds()
+        empty = not self.buffer.get_text(start, end, True)
+        self.editor_scroll.set_policy(
+            Gtk.PolicyType.NEVER,
+            Gtk.PolicyType.NEVER if empty else Gtk.PolicyType.AUTOMATIC,
+        )
+        self.editor_scroll.set_min_content_height(0 if empty else EDITOR_MIN_HEIGHT)
+        self.placeholder.set_label(self.placeholder_text)
+        self.placeholder.set_visible(
+            empty and bool(self.placeholder_text) and not self.text_view.has_focus()
+        )
+
+    def _on_buffer_changed(self, _buffer):
+        self._sync_placeholder()
+        if self.suppress_buffer_change:
+            return
+        self.dirty = True
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+        self.save_source = GLib.timeout_add(800, self._save_transcript)
+
+    def _save_transcript(self, retry=True):
+        self.save_source = None
+        if not self.dirty:
+            return GLib.SOURCE_REMOVE
+        start, end = self.buffer.get_bounds()
+        transcript = self.buffer.get_text(start, end, True)
+        if self.panel.write_transcript(self, transcript):
+            self.dirty = False
+        elif retry and self.panel.cards.get(self.entry_id) is self:
+            self.save_source = GLib.timeout_add(1000, self._save_transcript)
+        return GLib.SOURCE_REMOVE
+
+    def flush_now(self):
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+        if self.dirty:
+            self._save_transcript(retry=False)
+
+    def dispose(self):
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+
+    def update(self, record, initial=False):
+        self.record = record
+
+        status, text = self._display_status(record)
+        self.placeholder_text = self.PLACEHOLDERS.get(status, "")
+        for css_class in self.STATUS_CLASSES:
+            self.root.remove_css_class(css_class)
+        self.root.add_css_class("status-" + status)
+        self.status_label.set_label(text)
+        self.status_label.set_visible(bool(text))
+        if self.plain:
+            # Nothing else lives in the heading row; drop it while idle.
+            self.heading.set_visible(bool(text))
+
+        if self.title_label is not None:
+            context = record.get("context")
+            if not isinstance(context, dict):
+                context = {}
+            title = context.get("title")
+            self.title_label.set_label(str(title) if title else "")
+
+        transcript = record.get("transcript", "")
+        if not isinstance(transcript, str):
+            transcript = str(transcript)
+        if initial or not self.dirty:
+            insert = self.buffer.get_iter_at_mark(self.buffer.get_insert())
+            caret = insert.get_offset()
+            start, end = self.buffer.get_bounds()
+            current = self.buffer.get_text(start, end, True)
+            if current != transcript:
+                self.suppress_buffer_change = True
+                self.buffer.set_text(transcript)
+                new_iter = self.buffer.get_iter_at_offset(min(caret, len(transcript)))
+                self.buffer.place_cursor(new_iter)
+                self.suppress_buffer_change = False
+        self._sync_placeholder()
+
+    @staticmethod
+    def _display_status(record):
+        """(css suffix, label text). Finished entries carry no label text."""
+        status = record.get("status")
+        # Plain entries are never analyzed: no ANALYZING, no ERROR.
+        context_status = None if is_plain_entry(record) else record.get("context_status")
+        if context_status == "error":
+            return "context-error", "ERROR"
+        if status == "recording":
+            return "recording", "REC"
+        if status == "transcribing":
+            return "transcribing", "TRANSCRIBING"
+        if status == "no-transcript":
+            return "no-transcript", "NO TRANSCRIPT"
+        if context_status == "pending":
+            return "analyzing", "ANALYZING"
+        return "done", ""
+
+
+class SectionRow:
+    """A `kind: section` record: an inline-editable title and a delete glyph."""
+
+    def __init__(self, panel, record):
+        self.panel = panel
+        self.entry_id = record["id"]
+        self.record = record
+        self.widget_kind = widget_kind(record)
+        self.dirty = False
+        self.suppress_change = False
+        self.save_source = None
+
+        self.root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.root.add_css_class("section-row")
+
+        self.entry = Gtk.Entry()
+        self.entry.set_hexpand(True)
+        self.entry.set_has_frame(False)
+        self.entry.add_css_class("section-title")
+        self.entry.connect("changed", self._on_changed)
+        self.entry.connect("activate", lambda _entry: self.flush_now())
+        self.root.append(self.entry)
+
+        self.delete_button = Gtk.Button(label=GLYPH_CLOSE)
+        self.delete_button.set_tooltip_text("Delete section")
+        self.delete_button.set_valign(Gtk.Align.CENTER)
+        self.delete_button.add_css_class("section-delete")
+        self.delete_button.add_css_class("hover-hidden")
+        self.delete_button.connect("clicked", self._on_delete)
+        self.root.append(self.delete_button)
+
+        # Idle rows are just a title on a hairline; the ✕ fades in on hover.
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", self._on_row_enter)
+        motion.connect("leave", self._on_row_leave)
+        self.root.add_controller(motion)
+
+        self.update(record, initial=True)
+
+    def collapse_selection(self):
+        """Drop a select-all left behind by a focus grab nobody asked for."""
+        if self.entry.has_focus() or self.entry.get_focus_child() is not None:
+            return
+        position = self.entry.get_position()
+        self.entry.select_region(position, position)
+
+    def _on_row_enter(self, _controller, _x, _y):
+        self.delete_button.remove_css_class("hover-hidden")
+
+    def _on_row_leave(self, _controller):
+        self.delete_button.add_css_class("hover-hidden")
+
+    def _on_changed(self, _entry):
+        if self.suppress_change:
+            return
+        self.dirty = True
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+        self.save_source = GLib.timeout_add(800, self._save_title)
+
+    def _save_title(self, retry=True):
+        self.save_source = None
+        if not self.dirty:
+            return GLib.SOURCE_REMOVE
+        title = self.entry.get_text()
+        if self.panel.write_record(self, {"title": title}):
+            self.dirty = False
+        elif retry and self.panel.cards.get(self.entry_id) is self:
+            self.save_source = GLib.timeout_add(1000, self._save_title)
+        return GLib.SOURCE_REMOVE
+
+    def _on_delete(self, _button):
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+        self.dirty = False
+        self.panel.delete_record(self)
+
+    def flush_now(self):
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+        if self.dirty:
+            self._save_title(retry=False)
+
+    def dispose(self):
+        if self.save_source is not None:
+            GLib.source_remove(self.save_source)
+            self.save_source = None
+
+    def update(self, record, initial=False):
+        self.record = record
+        title = record.get("title")
+        title = str(title) if title else ""
+        if initial or not self.dirty:
+            if self.entry.get_text() != title:
+                self.suppress_change = True
+                position = self.entry.get_position()
+                self.entry.set_text(title)
+                # set_text selects the whole value; collapse it back to a caret.
+                caret = min(max(position, 0), len(title))
+                self.entry.select_region(caret, caret)
+                self.entry.set_position(caret)
+                self.suppress_change = False
+
+
+def is_plain_entry(record):
+    """A plain note: written while the AI toggle was off (`ai: false`)."""
+    return record.get("ai") is False
+
+
+def widget_kind(record):
+    """(widget class, plain flag) — the widget a record needs."""
+    if record.get("kind") == "section":
+        return (SectionRow, False)
+    return (EntryCard, is_plain_entry(record))
+
+
+class PanelApplication(Gtk.Application):
+    MONITOR_EVENTS = {
+        Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+        Gio.FileMonitorEvent.CREATED,
+        Gio.FileMonitorEvent.RENAMED,
+        Gio.FileMonitorEvent.MOVED,
+        Gio.FileMonitorEvent.MOVED_IN,
+    }
+
+    def __init__(self):
+        super().__init__(application_id="io.ui_notes.Panel")
+        self.runtime_dir = runtime_dir()
+        self.session_file = os.path.join(self.runtime_dir, "session")
+        self.socket_path = os.path.join(self.runtime_dir, "panel.sock")
+        self.lock_path = os.path.join(self.runtime_dir, "lock")
+        self.session_dir = None
+        self.entries_monitors = []
+        self.monitored_data_dir = None
+        self.monitor_reload_source = None
+        self.records = {}
+        self.cards = {}
+        self.window = None
+        self.shot_window = None
+        self.shot_frame = None
+        self.shot_picture = None
+        self.shot_hide_source = None
+        self.shot_fade_source = None
+        # Entries present when a session is first read never pop up.
+        self.shot_armed = False
+        self.ai_button = None
+        self.ai_enabled = None
+        self.suppress_ai_toggle = False
+        self.css_provider = None
+        self.server = None
+        self.server_watch = None
+        self.socket_inode = None
+        self.clients = {}
+        self.session_read_warned = False
+        self.shown_at = None
+        self.focus_before_hide = None
+        self.connect("shutdown", self._on_shutdown)
+
+    def do_activate(self):
+        if self.window is not None:
+            self.window.set_visible(True)
+            GLib.idle_add(self._clear_focus)
+            return
+
+        os.makedirs(self.runtime_dir, mode=0o700, exist_ok=True)
+        self._build_window()
+        self._start_socket_server()
+        self._check_session_file()
+        GLib.timeout_add_seconds(1, self._poll_session)
+        self.window.set_visible(True)
+        self.shown_at = time.monotonic()
+        # Mapping the surface focuses the first focusable widget; the panel
+        # opens with nothing focused, so no field looks pre-selected.
+        GLib.idle_add(self._clear_focus)
+
+    def apply_theme(self):
+        """Resolve the Omarchy theme and swap the display's CSS provider."""
+        display = Gdk.Display.get_default()
+        if display is None:
+            warn("no display; skipping theme apply")
+            return
+        try:
+            theme = resolve_theme()
+            css = build_css(theme)
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css)
+        except Exception as error:  # never let a theme problem kill the panel
+            warn(f"cannot build theme CSS: {error}")
+            return
+        if self.css_provider is not None:
+            Gtk.StyleContext.remove_provider_for_display(display, self.css_provider)
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        self.css_provider = provider
+
+    def _build_window(self):
+        self.window = Gtk.ApplicationWindow(application=self)
+        self.window.set_title("UI Notes")
+        self.window.set_decorated(False)
+        self.window.set_resizable(False)
+        # The surface is anchored top+right only and follows its content height,
+        # so ask for a fixed width and let GTK pick the height.
+        self.window.set_default_size(PANEL_WIDTH, -1)
+        self.window.set_size_request(PANEL_WIDTH, -1)
+
+        Gtk4LayerShell.init_for_window(self.window)
+        Gtk4LayerShell.set_namespace(self.window, "ui-notes")
+        Gtk4LayerShell.set_layer(self.window, Gtk4LayerShell.Layer.OVERLAY)
+        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.TOP, True)
+        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.RIGHT, True)
+        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.BOTTOM, False)
+        Gtk4LayerShell.set_anchor(self.window, Gtk4LayerShell.Edge.LEFT, False)
+        Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.TOP, PANEL_MARGIN)
+        Gtk4LayerShell.set_margin(self.window, Gtk4LayerShell.Edge.RIGHT, PANEL_MARGIN)
+        Gtk4LayerShell.set_keyboard_mode(
+            self.window, Gtk4LayerShell.KeyboardMode.ON_DEMAND
+        )
+        Gtk4LayerShell.set_exclusive_zone(self.window, 0)
+
+        self.apply_theme()
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        root.add_css_class("panel")
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        header.add_css_class("panel-header")
+        header.set_halign(Gtk.Align.END)
+        header.set_size_request(-1, 22)
+        self.ai_button = Gtk.ToggleButton(label=GLYPH_AI)
+        self.ai_button.set_tooltip_text("AI screen analysis")
+        self.ai_button.add_css_class("ai-toggle")
+        self.ai_button.connect("toggled", self._on_ai_toggled)
+        section_button = Gtk.Button(label=GLYPH_PLUS)
+        section_button.set_tooltip_text("New section")
+        section_button.connect("clicked", self._new_section)
+        folder_button = Gtk.Button(label=GLYPH_FOLDER)
+        folder_button.set_tooltip_text("Choose folder")
+        folder_button.connect("clicked", self._choose_folder)
+        end_button = Gtk.Button(label=GLYPH_CLOSE)
+        end_button.set_tooltip_text("End session")
+        end_button.connect("clicked", self._end_session)
+        for button in (self.ai_button, section_button, folder_button, end_button):
+            button.set_can_focus(False)  # header buttons never hold keyboard focus (no stray accent border)
+        header.append(self.ai_button)
+        header.append(section_button)
+        header.append(folder_button)
+        header.append(end_button)
+        root.append(header)
+        self._sync_ai_state()
+
+        self.content_stack = Gtk.Stack()
+        self.content_stack.set_vexpand(True)
+        self.empty_label = Gtk.Label(label=EMPTY_TEXT, xalign=0)
+        self.empty_label.set_halign(Gtk.Align.START)
+        self.empty_label.set_valign(Gtk.Align.START)
+        self.empty_label.add_css_class("empty-state")
+        self.content_stack.add_named(self.empty_label, "empty")
+
+        self.entries_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.entries_box.set_valign(Gtk.Align.START)
+        self.scroller = Gtk.ScrolledWindow()
+        self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # The list drives the surface height: it grows with its content up to
+        # 70% of the monitor, then scrolls.
+        self.scroller.set_propagate_natural_height(True)
+        self.scroller.set_min_content_height(LIST_MIN_HEIGHT)
+        self.scroller.set_max_content_height(self._list_max_height())
+        self.scroller.set_vexpand(True)
+        self.scroller.set_child(self.entries_box)
+        self.content_stack.add_named(self.scroller, "entries")
+        root.append(self.content_stack)
+        self.window.set_child(root)
+
+        self._build_shot_window()
+
+    @staticmethod
+    def _list_max_height():
+        try:
+            monitors = Gdk.Display.get_default().get_monitors()
+            if monitors.get_n_items():
+                height = monitors.get_item(0).get_geometry().height
+                if height > 0:
+                    return max(int(height * LIST_MAX_FRACTION), LIST_MIN_HEIGHT)
+        except Exception as error:  # pragma: no cover - defensive
+            warn(f"monitor geometry unavailable: {error}")
+        return LIST_MAX_FALLBACK
+
+    def _build_shot_window(self):
+        """A separate layer surface that flashes the newest screenshot."""
+        self.shot_window = Gtk.Window(application=self)
+        self.shot_window.set_decorated(False)
+        self.shot_window.set_resizable(False)
+        self.shot_window.set_default_size(SHOT_WIDTH, SHOT_HEIGHT)
+        self.shot_window.set_size_request(SHOT_WIDTH, SHOT_HEIGHT)
+
+        Gtk4LayerShell.init_for_window(self.shot_window)
+        Gtk4LayerShell.set_namespace(self.shot_window, "ui-notes-shot")
+        Gtk4LayerShell.set_layer(self.shot_window, Gtk4LayerShell.Layer.OVERLAY)
+        Gtk4LayerShell.set_anchor(self.shot_window, Gtk4LayerShell.Edge.TOP, True)
+        Gtk4LayerShell.set_anchor(self.shot_window, Gtk4LayerShell.Edge.RIGHT, True)
+        Gtk4LayerShell.set_anchor(self.shot_window, Gtk4LayerShell.Edge.BOTTOM, False)
+        Gtk4LayerShell.set_anchor(self.shot_window, Gtk4LayerShell.Edge.LEFT, False)
+        Gtk4LayerShell.set_margin(self.shot_window, Gtk4LayerShell.Edge.TOP, PANEL_MARGIN)
+        Gtk4LayerShell.set_margin(
+            self.shot_window, Gtk4LayerShell.Edge.RIGHT, SHOT_RIGHT_MARGIN
+        )
+        Gtk4LayerShell.set_exclusive_zone(self.shot_window, 0)
+        Gtk4LayerShell.set_keyboard_mode(
+            self.shot_window, Gtk4LayerShell.KeyboardMode.NONE
+        )
+
+        self.shot_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.shot_frame.add_css_class("shot-popup")
+        self.shot_picture = Gtk.Picture()
+        self.shot_picture.set_can_shrink(True)
+        self.shot_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.shot_picture.set_size_request(SHOT_WIDTH, SHOT_HEIGHT)
+        self.shot_frame.append(self.shot_picture)
+        self.shot_window.set_child(self.shot_frame)
+
+    def _clear_focus(self):
+        if self.window is None:
+            return GLib.SOURCE_REMOVE
+        self.window.set_focus(None)
+        for card in self.cards.values():
+            if isinstance(card, SectionRow):
+                card.collapse_selection()
+        return GLib.SOURCE_REMOVE
+
+    def _restore_focus(self):
+        """After a hide/show cycle, put focus back exactly where it was."""
+        widget = self.focus_before_hide
+        if widget is not None and widget.get_root() is self.window:
+            self.window.set_focus(widget)
+        else:
+            self.window.set_focus(None)
+        return GLib.SOURCE_REMOVE
+
+    def _focus_new_section(self, entry_id):
+        """Select a just-created section title so typing replaces it."""
+        card = self.cards.get(entry_id)
+        if not isinstance(card, SectionRow):
+            return GLib.SOURCE_REMOVE
+        self.window.present()
+        card.entry.grab_focus()
+        card.entry.select_region(0, -1)
+        return GLib.SOURCE_REMOVE
+
+    def _settle_focus(self, arrived, records):
+        """Focus a section the user just added; otherwise focus nothing."""
+        target = None
+        if (
+            self.shown_at is not None
+            and time.monotonic() - self.shown_at > NEW_SECTION_FOCUS_DELAY
+        ):
+            for entry_id in arrived:
+                record = records.get(entry_id)
+                if isinstance(record, dict) and record.get("kind") == "section":
+                    target = entry_id
+        if target is not None:
+            GLib.idle_add(self._focus_new_section, target)
+            return
+        focus = self.window.get_focus() if self.window is not None else None
+        if focus is None or focus.get_root() is not self.window:
+            # Rebuilding cards can hand focus to a fresh widget; take it back.
+            GLib.idle_add(self._clear_focus)
+
+    def _poll_session(self):
+        self._check_session_file()
+        self._sync_ai_state()
+        return GLib.SOURCE_CONTINUE
+
+    def _read_session_path(self):
+        try:
+            with open(self.session_file, encoding="utf-8") as handle:
+                path = handle.read().strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError) as error:
+            if not self.session_read_warned:
+                warn(f"cannot read active session file: {error}")
+                self.session_read_warned = True
+            return None
+        if not path:
+            return None
+        if not os.path.isabs(path):
+            warn(f"ignoring non-absolute session path: {path!r}")
+            return None
+        return os.path.normpath(path)
+
+    def _check_session_file(self):
+        path = self._read_session_path()
+        if path == self.session_dir:
+            return
+        self._switch_session(path)
+
+    def _switch_session(self, path):
+        if self.session_dir is not None:
+            for card in list(self.cards.values()):
+                card.flush_now()
+        self._clear_cards()
+        self._cancel_entries_monitors()
+        self.hide_shot()
+        self.shot_armed = False
+        self.session_dir = path
+
+        if path is None:
+            self.empty_label.set_label(EMPTY_TEXT)
+            self.content_stack.set_visible_child_name("empty")
+            return
+
+        self._start_entries_monitor(path)
+        self.reload_entries(reason="session")
+
+    def entries_path(self):
+        if self.session_dir is None:
+            return None
+        return os.path.join(self.session_dir, DATA_SUBDIR, "entries.jsonl")
+
+    def _start_entries_monitor(self, path):
+        self._cancel_entries_monitors()
+        directories = [path]
+        data_dir = os.path.join(path, DATA_SUBDIR)
+        if os.path.isdir(data_dir):
+            directories.append(data_dir)
+        for directory_path in directories:
+            try:
+                directory = Gio.File.new_for_path(directory_path)
+                monitor = directory.monitor_directory(
+                    Gio.FileMonitorFlags.WATCH_MOVES, None
+                )
+            except GLib.Error as error:
+                warn(f"cannot monitor {directory_path}: {error.message}")
+                continue
+            monitor.connect("changed", self._on_directory_changed)
+            self.entries_monitors.append(monitor)
+        self.monitored_data_dir = data_dir if len(directories) > 1 else None
+
+    def _cancel_entries_monitors(self):
+        for monitor in self.entries_monitors:
+            monitor.cancel()
+        self.entries_monitors = []
+        self.monitored_data_dir = None
+
+    def _on_directory_changed(self, _monitor, file, other_file, event):
+        if event not in self.MONITOR_EVENTS:
+            return
+        names = []
+        if file is not None:
+            names.append(file.get_basename())
+        if other_file is not None:
+            names.append(other_file.get_basename())
+        if "entries.jsonl" not in names and DATA_SUBDIR not in names:
+            return
+        if (
+            self.session_dir is not None
+            and self.monitored_data_dir is None
+            and os.path.isdir(os.path.join(self.session_dir, DATA_SUBDIR))
+        ):
+            self._start_entries_monitor(self.session_dir)
+        if self.monitor_reload_source is not None:
+            GLib.source_remove(self.monitor_reload_source)
+        self.monitor_reload_source = GLib.timeout_add(40, self._monitor_reload)
+
+    def _monitor_reload(self):
+        self.monitor_reload_source = None
+        self.reload_entries(reason="file change")
+        return GLib.SOURCE_REMOVE
+
+    def _read_entries(self):
+        records = {}
+        if self.session_dir is None:
+            return records
+        path = self.entries_path()
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        warn(f"skipping malformed entries.jsonl line {line_number}: {error}")
+                        continue
+                    if not isinstance(record, dict):
+                        warn(f"skipping non-object entries.jsonl line {line_number}")
+                        continue
+                    entry_id = record.get("id")
+                    if isinstance(entry_id, bool) or not isinstance(entry_id, int):
+                        warn(f"skipping entries.jsonl line {line_number} without integer id")
+                        continue
+                    if entry_id in records:
+                        warn(f"duplicate entry id {entry_id}; using the last line")
+                    records[entry_id] = record
+        except (OSError, UnicodeError) as error:
+            warn(f"cannot read entries.jsonl: {error}")
+            return ENTRIES_READ_FAILED
+        return records
+
+    def reload_entries(self, reason="manual"):
+        old_ids = set(self.records)
+        new_records = self._read_entries()
+        if new_records is ENTRIES_READ_FAILED:
+            return
+        new_ids = set(new_records)
+        adjustment = self.scroller.get_vadjustment()
+        old_scroll = adjustment.get_value()
+        structural_change = old_ids != new_ids
+
+        for entry_id in old_ids - new_ids:
+            card = self.cards.pop(entry_id)
+            card.dispose()
+            self.entries_box.remove(card.root)
+
+        for entry_id in sorted(new_ids):
+            record = new_records[entry_id]
+            wanted = widget_kind(record)
+            card = self.cards.get(entry_id)
+            if card is not None and card.widget_kind != wanted:
+                # A record changed kind (section, or plain vs AI); rebuild it.
+                card.dispose()
+                self.entries_box.remove(card.root)
+                del self.cards[entry_id]
+                card = None
+            if card is None:
+                card = wanted[0](self, record)
+                self.cards[entry_id] = card
+                self.entries_box.append(card.root)
+            elif self.records.get(entry_id) != record:
+                card.update(record)
+
+        previous = None
+        for entry_id in sorted(new_ids):
+            card = self.cards[entry_id]
+            self.entries_box.reorder_child_after(card.root, previous)
+            previous = card.root
+
+        arrived = sorted(new_ids - old_ids)
+        self.records = new_records
+        self._settle_focus(arrived, new_records)
+        if self.shot_armed:
+            self._maybe_show_shot(arrived, new_records)
+        elif self.session_dir is not None:
+            self.shot_armed = True
+        count = len(new_records)
+        if self.session_dir is None:
+            self.empty_label.set_label(EMPTY_TEXT)
+            self.content_stack.set_visible_child_name("empty")
+        elif count == 0:
+            self.empty_label.set_label("")
+            self.content_stack.set_visible_child_name("empty")
+        else:
+            self.content_stack.set_visible_child_name("entries")
+            if structural_change:
+                GLib.idle_add(self._scroll_to_bottom)
+            else:
+                GLib.idle_add(self._restore_scroll, old_scroll)
+        warn(f"{reason}: loaded {count} entries")
+
+    def _restore_scroll(self, value):
+        adjustment = self.scroller.get_vadjustment()
+        maximum = max(adjustment.get_lower(), adjustment.get_upper() - adjustment.get_page_size())
+        adjustment.set_value(min(max(value, adjustment.get_lower()), maximum))
+        return GLib.SOURCE_REMOVE
+
+    def _scroll_to_bottom(self):
+        adjustment = self.scroller.get_vadjustment()
+        adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
+        return GLib.SOURCE_REMOVE
+
+    def _clear_cards(self):
+        for card in list(self.cards.values()):
+            card.dispose()
+            self.entries_box.remove(card.root)
+        self.cards.clear()
+        self.records.clear()
+
+    def _maybe_show_shot(self, arrived, records):
+        """Flash the newest freshly-arrived entry that has a screenshot on disk."""
+        for entry_id in reversed(arrived):
+            record = records.get(entry_id)
+            if not isinstance(record, dict) or record.get("kind") == "section":
+                continue
+            shot = record.get("shot")
+            if not isinstance(shot, str) or not shot or not os.path.isabs(shot):
+                continue
+            path = os.path.normpath(shot)
+            if not os.path.isfile(path):
+                continue
+            self.show_shot(path)
+            return
+
+    def show_shot(self, path):
+        if self.shot_window is None:
+            return
+        try:
+            texture = Gdk.Texture.new_from_filename(path)
+        except GLib.Error as error:
+            warn(f"cannot load screenshot {path}: {error.message}")
+            return
+        self._cancel_shot_timers()
+        self.shot_picture.set_paintable(texture)
+        self.shot_frame.remove_css_class("faded")
+        self.shot_window.set_visible(True)
+        self.shot_hide_source = GLib.timeout_add(SHOT_VISIBLE_MS, self._start_shot_fade)
+
+    def _start_shot_fade(self):
+        self.shot_hide_source = None
+        self.shot_frame.add_css_class("faded")
+        self.shot_fade_source = GLib.timeout_add(SHOT_FADE_MS, self._finish_shot_fade)
+        return GLib.SOURCE_REMOVE
+
+    def _finish_shot_fade(self):
+        self.shot_fade_source = None
+        self.hide_shot()
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_shot_timers(self):
+        if self.shot_hide_source is not None:
+            GLib.source_remove(self.shot_hide_source)
+            self.shot_hide_source = None
+        if self.shot_fade_source is not None:
+            GLib.source_remove(self.shot_fade_source)
+            self.shot_fade_source = None
+
+    def hide_shot(self):
+        self._cancel_shot_timers()
+        if self.shot_window is not None:
+            self.shot_window.set_visible(False)
+            self.shot_frame.remove_css_class("faded")
+
+    def write_transcript(self, card, transcript):
+        return self.write_record(card, {"transcript": transcript})
+
+    def write_record(self, card, changes):
+        """Merge `changes` into this card's record under the runtime lock."""
+        if self.cards.get(card.entry_id) is not card or self.session_dir is None:
+            return True
+        return self._rewrite_entries(card.entry_id, changes)
+
+    def delete_record(self, card):
+        if self.cards.get(card.entry_id) is not card or self.session_dir is None:
+            return True
+        entry_id = card.entry_id
+        if not self._rewrite_entries(entry_id, None, delete=True):
+            warn(f"cannot delete entry {entry_id}")
+            return False
+        card = self.cards.pop(entry_id, None)
+        if card is not None:
+            card.dispose()
+            self.entries_box.remove(card.root)
+        self.records.pop(entry_id, None)
+        if self.session_dir is not None and not self.records:
+            self.empty_label.set_label("")
+            self.content_stack.set_visible_child_name("empty")
+        return True
+
+    def _rewrite_entries(self, entry_id, changes, delete=False):
+        if self.session_dir is None:
+            return True
+        entries_path = self.entries_path()
+        tmp_path = entries_path + ".tmp"
+        try:
+            os.makedirs(self.runtime_dir, mode=0o700, exist_ok=True)
+            with open(self.lock_path, "a+", encoding="utf-8") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    try:
+                        with open(entries_path, encoding="utf-8") as handle:
+                            lines = handle.readlines()
+                    except FileNotFoundError:
+                        lines = []
+
+                    replacement = None
+                    replacement_index = None
+                    output = []
+                    for line in lines:
+                        try:
+                            candidate = json.loads(line)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            candidate = None
+                        candidate_id = candidate.get("id") if isinstance(candidate, dict) else None
+                        if (
+                            not isinstance(candidate_id, bool)
+                            and isinstance(candidate_id, int)
+                            and candidate_id == entry_id
+                        ):
+                            replacement = candidate
+                            if replacement_index is None:
+                                replacement_index = len(output)
+                            continue
+                        output.append(line)
+                    if delete:
+                        pass
+                    elif replacement is None:
+                        replacement = {"id": entry_id}
+                        replacement.update(changes)
+                        if output and not output[-1].endswith("\n"):
+                            output[-1] += "\n"
+                        output.append(
+                            json.dumps(replacement, ensure_ascii=False, separators=(",", ":"))
+                            + "\n"
+                        )
+                    else:
+                        replacement.update(changes)
+                        output.insert(
+                            replacement_index,
+                            json.dumps(replacement, ensure_ascii=False, separators=(",", ":"))
+                            + "\n",
+                        )
+
+                    with open(tmp_path, "w", encoding="utf-8") as handle:
+                        handle.writelines(output)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(tmp_path, entries_path)
+                finally:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            command = resolve_ui_notes()
+            if command is None:
+                warn("cannot find ui-notes in PATH or next to panel script; notes.md not rendered")
+            else:
+                try:
+                    spawn_detached([command, "render"])
+                except OSError as error:
+                    warn(f"cannot run ui-notes render: {error}")
+            return True
+        except (OSError, UnicodeError) as error:
+            warn(f"cannot rewrite entry {entry_id}: {error}")
+            return False
+
+    def _style_ai_button(self, enabled):
+        if self.ai_button is None:
+            return
+        self.ai_button.remove_css_class("ai-off" if enabled else "ai-on")
+        self.ai_button.add_css_class("ai-on" if enabled else "ai-off")
+
+    def _sync_ai_state(self):
+        """Mirror ~/.config/ui-notes/ai; corrects an optimistic click flip."""
+        if self.ai_button is None:
+            return
+        enabled = read_ai_enabled()
+        if enabled == self.ai_enabled and self.ai_button.get_active() == enabled:
+            return
+        self.ai_enabled = enabled
+        if self.ai_button.get_active() != enabled:
+            # set_active re-emits `toggled`; that is not a user click.
+            self.suppress_ai_toggle = True
+            try:
+                self.ai_button.set_active(enabled)
+            finally:
+                self.suppress_ai_toggle = False
+        self._style_ai_button(enabled)
+
+    def _on_ai_toggled(self, button):
+        if self.suppress_ai_toggle:
+            return
+        # Flip the look now; the 1 s poll re-reads the file and corrects it.
+        self.ai_enabled = button.get_active()
+        self._style_ai_button(self.ai_enabled)
+        command = resolve_ui_notes()
+        if command is None:
+            warn("cannot find ui-notes in PATH or next to panel script; AI unchanged")
+            return
+        try:
+            spawn_detached([command, "ai", "toggle"])
+        except OSError as error:
+            warn(f"cannot run ui-notes ai toggle: {error}")
+
+    def _new_section(self, _button):
+        command = resolve_ui_notes()
+        if command is None:
+            warn("cannot find ui-notes in PATH or next to panel script; no section added")
+            return
+        try:
+            spawn_detached([command, "section"])
+        except OSError as error:
+            warn(f"cannot run ui-notes section: {error}")
+
+    def _choose_folder(self, _button):
+        try:
+            dialog = Gtk.FileDialog()
+            dialog.set_title("Choose folder")
+            dialog.select_folder(self.window, None, self._on_folder_chosen)
+        except Exception as error:  # pragma: no cover - defensive
+            warn(f"cannot open folder chooser: {error}")
+
+    def _on_folder_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error as error:
+            # Dismissing the chooser raises GTK_DIALOG_ERROR_DISMISSED; nothing to do.
+            warn(f"folder chooser closed without a selection: {error.message}")
+            return
+        path = folder.get_path() if folder is not None else None
+        if not path:
+            warn("chosen folder has no local path")
+            return
+        command = resolve_ui_notes()
+        if command is None:
+            warn("cannot find ui-notes in PATH or next to panel script; not relocating")
+            return
+        try:
+            spawn_detached([command, "relocate", path])
+        except OSError as error:
+            warn(f"cannot run ui-notes relocate: {error}")
+
+    def _end_session(self, _button):
+        command = resolve_ui_notes()
+        if command is None:
+            warn("cannot find ui-notes in PATH or next to panel script; session remains active")
+            return
+        try:
+            spawn_detached([command, "stop"])
+        except OSError as error:
+            warn(f"cannot run ui-notes stop: {error}")
+
+    def _start_socket_server(self):
+        try:
+            os.unlink(self.socket_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            warn(f"cannot remove stale panel socket: {error}")
+            self.quit()
+            return
+
+        try:
+            self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.server.setblocking(False)
+            self.server.bind(self.socket_path)
+            os.chmod(self.socket_path, 0o600)
+            self.socket_inode = os.stat(self.socket_path).st_ino
+            self.server.listen(8)
+            flags = GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP
+            self.server_watch = GLib.io_add_watch(
+                self.server.fileno(), flags, self._on_server_io
+            )
+        except OSError as error:
+            warn(f"cannot create panel socket: {error}")
+            if self.server is not None:
+                self.server.close()
+                self.server = None
+            self.quit()
+
+    def _on_server_io(self, _source, condition):
+        if condition & (GLib.IO_ERR | GLib.IO_HUP):
+            return GLib.SOURCE_REMOVE
+        while True:
+            try:
+                connection, _address = self.server.accept()
+            except BlockingIOError:
+                break
+            except OSError as error:
+                warn(f"panel socket accept failed: {error}")
+                break
+            connection.setblocking(True)
+            fd = connection.fileno()
+            flags = GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP
+            watch = GLib.io_add_watch(
+                fd,
+                flags,
+                lambda source, event, conn=connection: self._on_client_io(
+                    source, event, conn
+                ),
+            )
+            self.clients[fd] = {"socket": connection, "buffer": b"", "watch": watch}
+        return GLib.SOURCE_CONTINUE
+
+    def _on_client_io(self, _source, condition, connection):
+        fd = connection.fileno()
+        state = self.clients.get(fd)
+        if state is None:
+            return GLib.SOURCE_REMOVE
+        if condition & GLib.IO_ERR and not condition & GLib.IO_IN:
+            self._close_client(connection, remove_watch=False)
+            return GLib.SOURCE_REMOVE
+        if condition & GLib.IO_IN:
+            while True:
+                try:
+                    data = connection.recv(65536)
+                except OSError:
+                    self._close_client(connection, remove_watch=False)
+                    return GLib.SOURCE_REMOVE
+                if not data:
+                    self._close_client(connection, remove_watch=False)
+                    return GLib.SOURCE_REMOVE
+                state["buffer"] += data
+                if len(state["buffer"]) > 1024 * 1024:
+                    self._send_response(connection, {"ok": False, "error": "request too large"})
+                    self._close_client(connection, remove_watch=False)
+                    return GLib.SOURCE_REMOVE
+
+                while b"\n" in state["buffer"]:
+                    line, state["buffer"] = state["buffer"].split(b"\n", 1)
+                    self._handle_socket_line(connection, line)
+                if not condition & GLib.IO_HUP:
+                    break
+
+        if condition & (GLib.IO_ERR | GLib.IO_HUP):
+            self._close_client(connection, remove_watch=False)
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _handle_socket_line(self, connection, line):
+        try:
+            request = json.loads(line.decode("utf-8"))
+            command = request.get("cmd") if isinstance(request, dict) else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_response(connection, {"ok": False, "error": "invalid JSON"})
+            return
+
+        if command == "hide":
+            self.hide_shot()
+            self._hide_and_flush()
+            self._send_response(connection, {"ok": True})
+        elif command == "show":
+            self.window.set_visible(True)
+            GLib.idle_add(self._restore_focus)
+            self._send_response(connection, {"ok": True})
+        elif command == "reload":
+            self.reload_entries(reason="socket reload")
+            self._send_response(connection, {"ok": True})
+        elif command == "restyle":
+            self.apply_theme()
+            self._send_response(connection, {"ok": True})
+        elif command == "quit":
+            self._flush_dirty_transcripts()
+            self._send_response(connection, {"ok": True})
+            GLib.idle_add(self.quit)
+        elif command == "ping":
+            self._send_response(connection, {"ok": True, "pid": os.getpid()})
+        else:
+            self._send_response(connection, {"ok": False, "error": "unknown command"})
+
+    @staticmethod
+    def _send_response(connection, response):
+        payload = (json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8")
+        previous_timeout = connection.gettimeout()
+        try:
+            connection.settimeout(1.0)
+            connection.sendall(payload)
+        except OSError:
+            pass
+        finally:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    def _hide_and_flush(self):
+        clock = self.window.get_frame_clock()
+        ticked = [False]
+        handler = None
+        if clock is not None:
+            def after_paint(_clock):
+                ticked[0] = True
+
+            handler = clock.connect("after-paint", after_paint)
+            clock.request_phase(Gdk.FrameClockPhase.AFTER_PAINT)
+
+        self.focus_before_hide = self.window.get_focus()
+        self.window.set_visible(False)
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + 0.085
+        while context.pending() and time.monotonic() < deadline:
+            context.iteration(False)
+        while clock is not None and not ticked[0] and time.monotonic() < deadline:
+            if context.pending():
+                context.iteration(False)
+            else:
+                time.sleep(0.001)
+        while context.pending() and time.monotonic() < deadline:
+            context.iteration(False)
+        if clock is not None and handler is not None:
+            clock.disconnect(handler)
+
+    def _close_client(self, connection, remove_watch=True):
+        fd = connection.fileno()
+        state = self.clients.pop(fd, None)
+        if remove_watch and state is not None:
+            GLib.source_remove(state["watch"])
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+    def _flush_dirty_transcripts(self):
+        for card in list(self.cards.values()):
+            card.flush_now()
+
+    def _on_shutdown(self, _application):
+        self._flush_dirty_transcripts()
+        self._cancel_shot_timers()
+        if self.monitor_reload_source is not None:
+            GLib.source_remove(self.monitor_reload_source)
+            self.monitor_reload_source = None
+        self._cancel_entries_monitors()
+        for state in list(self.clients.values()):
+            self._close_client(state["socket"])
+        if self.server_watch is not None:
+            GLib.source_remove(self.server_watch)
+            self.server_watch = None
+        if self.server is not None:
+            self.server.close()
+            self.server = None
+        try:
+            if self.socket_inode is not None and os.stat(self.socket_path).st_ino == self.socket_inode:
+                os.unlink(self.socket_path)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            warn(f"cannot remove panel socket: {error}")
+
+
+def main():
+    application = PanelApplication()
+    return application.run(sys.argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

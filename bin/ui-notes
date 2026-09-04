@@ -1,0 +1,752 @@
+#!/usr/bin/python3
+import os
+import sys
+
+
+SHOT_RETENTION_SECONDS = 300
+
+
+def _runtime_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base:
+        return os.path.join(base, "ui-notes")
+    return f"/tmp/ui-notes-{os.getuid()}"
+
+
+def _session_path():
+    worker_session = os.environ.get("UI_NOTES_SESSION_PATH")
+    if worker_session:
+        return worker_session
+    try:
+        with open(os.path.join(_runtime_dir(), "session"), encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _inactive_ptt(argv):
+    if len(argv) == 3 and argv[1] == "ptt" and argv[2] in ("start", "stop"):
+        if _session_path() is None:
+            os.execvp("voxtype", ["voxtype", "record", argv[2]])
+
+
+_inactive_ptt(sys.argv)
+
+
+def main():
+    import contextlib
+    import datetime
+    import fcntl
+    import json
+    import re
+    import secrets
+    import shutil
+    import socket
+    import subprocess
+    import time
+    from pathlib import Path
+
+    runtime = Path(_runtime_dir())
+    project = Path(__file__).resolve().parent.parent
+    session_file = runtime / "session"
+
+    def resolve_session_path():
+        worker_path = os.environ.get("UI_NOTES_SESSION_PATH")
+        if not worker_path:
+            value = _session_path()
+            return Path(value) if value else None
+
+        worker_session = Path(worker_path)
+        if (worker_session / ".data" / "entries.jsonl").exists():
+            return worker_session
+
+        worker_id = os.environ.get("UI_NOTES_SESSION_ID", "")
+        if worker_id:
+            try:
+                current_path = session_file.read_text(encoding="utf-8").strip()
+                current_session = Path(current_path)
+                current_id = (current_session / ".data" / "id").read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+            else:
+                if current_path and current_id == worker_id:
+                    return current_session
+        return worker_session
+
+    def active_session(required=True):
+        session = resolve_session_path()
+        if session is None:
+            if required:
+                print("inactive", file=sys.stderr)
+                raise SystemExit(1)
+            return None
+        return session
+
+    def read_entries(session):
+        path = session / ".data" / "entries.jsonl"
+        if not path.exists():
+            return []
+        entries = []
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    entries.append(json.loads(line))
+        return entries
+
+    def session_label_and_date(session):
+        match = re.match(r"^(\d{8})-(\d{6})(?:-(.+))?$", session.name)
+        if not match:
+            return session.name, datetime.date.today().isoformat()
+        date = datetime.datetime.strptime(match.group(1), "%Y%m%d").date().isoformat()
+        return match.group(3) or session.name, date
+
+    def render_entries(session, entries):
+        label, date = session_label_and_date(session)
+        lines = [f"# UI review — {label} · {date}", ""]
+        has_sections = any(item.get("kind") == "section" for item in entries)
+        for entry in sorted(entries, key=lambda item: item["id"]):
+            if entry.get("kind") == "section":
+                lines.extend((f"## {entry.get('title', '')}", ""))
+                continue
+
+            transcript = entry.get("transcript", "").strip()
+            if transcript:
+                comment = transcript
+            elif entry.get("status") in ("recording", "transcribing"):
+                comment = "_transcribing…_"
+            else:
+                comment = "_no transcript_"
+            if entry.get("ai") is False:
+                lines.extend((comment, ""))
+                continue
+
+            entry_id = entry["id"]
+            context = entry.get("context") or {}
+            title = context.get("title") or f"Entry {entry_id}"
+            heading = "###" if has_sections else "##"
+            lines.append(f"{heading} {entry_id}. {title}")
+            if context:
+                lines.append(context.get("summary", ""))
+            elif entry.get("context_status") == "error":
+                lines.append("_analysis failed_")
+            else:
+                lines.append("_analysis pending…_")
+
+            lines.extend(("", "> " + comment.replace("\n", "\n> "), ""))
+
+        output = "\n".join(lines).rstrip() + "\n"
+        temporary = session / "notes.md.tmp"
+        temporary.write_text(output, encoding="utf-8")
+        os.replace(temporary, session / "notes.md")
+
+    @contextlib.contextmanager
+    def locked():
+        runtime.mkdir(parents=True, exist_ok=True)
+        with (runtime / "lock").open("a+") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    def rewrite_entries(session, entry_id, change):
+        entries = read_entries(session)
+        replacement = change(next((item for item in entries if item["id"] == entry_id), None))
+        found = False
+        rewritten = []
+        for item in entries:
+            if item["id"] == entry_id:
+                if not found:
+                    rewritten.append(replacement)
+                    found = True
+            else:
+                rewritten.append(item)
+        if not found:
+            rewritten.append(replacement)
+        temporary = session / ".data" / "entries.jsonl.tmp"
+        with temporary.open("w", encoding="utf-8") as handle:
+            for item in rewritten:
+                handle.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+        os.replace(temporary, session / ".data" / "entries.jsonl")
+        render_entries(session, rewritten)
+
+    def locked_rewrite(session, entry_id, change):
+        with locked():
+            rewrite_entries(session, entry_id, change)
+
+    def render(session):
+        with locked():
+            render_entries(session, read_entries(session))
+
+    def panel_request(command, timeout=1.5):
+        sock_path = runtime / "panel.sock"
+        deadline = time.monotonic() + timeout
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(max(0.01, deadline - time.monotonic()))
+            client.connect(str(sock_path))
+            client.sendall((json.dumps({"cmd": command}, separators=(",", ":")) + "\n").encode())
+            received = bytearray()
+            while b"\n" not in received:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"panel {command} timed out")
+                client.settimeout(remaining)
+                chunk = client.recv(4096)
+                if not chunk:
+                    raise ConnectionError("panel closed the socket")
+                received.extend(chunk)
+        reply = json.loads(received.split(b"\n", 1)[0])
+        if not reply.get("ok"):
+            raise RuntimeError(f"panel rejected {command}: {reply}")
+        return reply
+
+    def try_panel(command, timeout=1.5):
+        try:
+            return panel_request(command, timeout)
+        except (OSError, ValueError, TimeoutError, ConnectionError, RuntimeError):
+            return None
+
+    def launch_panel_if_needed():
+        if try_panel("ping", 0.25):
+            return
+        executable = "ui-notes-panel" if shutil.which("ui-notes-panel") else None
+        if executable is None:
+            adjacent = Path(__file__).resolve().with_name("ui-notes-panel")
+            if adjacent.exists():
+                executable = str(adjacent)
+        if executable:
+            try:
+                subprocess.Popen([executable], start_new_session=True)
+            except OSError:
+                pass
+
+    def start(name=None):
+        current = active_session(required=False)
+        if current:
+            launch_panel_if_needed()
+            print(current)
+            return
+        runtime.mkdir(parents=True, exist_ok=True)
+        shots_root = runtime / "shots"
+        shots_root.mkdir(parents=True, exist_ok=True)
+        for stale in shots_root.iterdir():
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale, ignore_errors=True)
+            else:
+                try:
+                    stale.unlink()
+                except FileNotFoundError:
+                    pass
+        root = Path.home() / "Documents" / "ui-notes"
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = ""
+        if name:
+            cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+            if not cleaned:
+                raise SystemExit("session name contains no usable characters")
+            suffix = "-" + cleaned
+        session = root / (stamp + suffix)
+        counter = 2
+        while session.exists():
+            session = root / f"{stamp}{suffix}-{counter}"
+            counter += 1
+        data = session / ".data"
+        for child in ("transcripts", "context", "logs"):
+            (data / child).mkdir(parents=True)
+        (data / "entries.jsonl").touch()
+        (data / "id").write_text(secrets.token_hex(8) + "\n", encoding="utf-8")
+        render(session)
+        temporary = runtime / "session.tmp"
+        temporary.write_text(str(session.resolve()) + "\n", encoding="utf-8")
+        os.replace(temporary, session_file)
+        launch_panel_if_needed()
+        print(session.resolve())
+
+    def stop():
+        stopped_session = None
+        try:
+            value = session_file.read_text(encoding="utf-8").strip()
+            if value:
+                stopped_session = Path(value)
+        except OSError:
+            pass
+        try:
+            session_file.unlink()
+        except FileNotFoundError:
+            pass
+        try_panel("quit")
+
+        if stopped_session is None:
+            return
+        sessions_root = Path.home() / "Documents" / "ui-notes"
+        if stopped_session.parent != sessions_root or not re.match(r"^\d{8}-\d{6}", stopped_session.name):
+            return
+        entries_path = stopped_session / ".data" / "entries.jsonl"
+        try:
+            entries_empty = not entries_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            entries_empty = True
+        except OSError:
+            return
+        if not entries_empty:
+            return
+        transcripts_path = stopped_session / ".data" / "transcripts"
+        walk_failed = False
+
+        def walk_error(_error):
+            nonlocal walk_failed
+            walk_failed = True
+
+        has_transcripts = False
+        if transcripts_path.exists():
+            for _directory, _directories, filenames in os.walk(transcripts_path, onerror=walk_error):
+                if filenames:
+                    has_transcripts = True
+                    break
+        if walk_failed or has_transcripts:
+            return
+        try:
+            shutil.rmtree(stopped_session)
+        except OSError:
+            pass
+
+    def worker_command(action, entry_id, session):
+        executable = Path(__file__).resolve()
+        argv = [str(executable), action, str(entry_id)]
+        log_path = session / ".data" / "logs" / f"{action}-{entry_id:03d}.log"
+        environment = os.environ.copy()
+        environment["UI_NOTES_SESSION_PATH"] = str(session)
+        try:
+            environment["UI_NOTES_SESSION_ID"] = (session / ".data" / "id").read_text(encoding="utf-8").strip()
+        except OSError:
+            environment["UI_NOTES_SESSION_ID"] = ""
+        with log_path.open("ab", buffering=0) as log:
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+                env=environment,
+            )
+
+    def next_id(session):
+        entries = read_entries(session)
+        return max((item["id"] for item in entries), default=0) + 1
+
+    def section(title=None):
+        session = active_session()
+        with locked():
+            entries = read_entries(session)
+            entry_id = max((item["id"] for item in entries), default=0) + 1
+            section_number = sum(item.get("kind") == "section" for item in entries) + 1
+            record = {
+                "id": entry_id,
+                "kind": "section",
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "title": f"Section {section_number}" if title is None else title,
+            }
+            rewrite_entries(session, entry_id, lambda current: record)
+        try_panel("reload")
+        print(entry_id)
+
+    def relocate(destination):
+        session = active_session()
+        destination = Path(destination)
+        if not destination.exists():
+            raise SystemExit(f"destination does not exist: {destination}")
+        if not destination.is_dir():
+            raise SystemExit(f"destination is not a directory: {destination}")
+        session_resolved = session.resolve()
+        destination_resolved = destination.resolve()
+        if destination_resolved.is_relative_to(session_resolved):
+            raise SystemExit("destination must not be inside the current session")
+        for name in ("notes.md", ".data"):
+            target = destination_resolved / name
+            if target.exists() or target.is_symlink():
+                raise SystemExit(f"destination already contains {name}")
+
+        with locked():
+            shutil.move(str(session / "notes.md"), str(destination_resolved / "notes.md"))
+            shutil.move(str(session / ".data"), str(destination_resolved / ".data"))
+            try:
+                session.rmdir()
+            except OSError:
+                pass
+            temporary = runtime / "session.tmp"
+            temporary.write_text(str(destination_resolved) + "\n", encoding="utf-8")
+            os.replace(temporary, session_file)
+        print(destination_resolved)
+
+    def ai(action=None):
+        path = Path.home() / ".config" / "ui-notes" / "ai"
+        try:
+            state = "off" if path.read_text(encoding="utf-8").strip() == "off" else "on"
+        except OSError:
+            state = "on"
+        if action is not None:
+            if action == "toggle":
+                state = "off" if state == "on" else "on"
+            else:
+                state = action
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name("ai.tmp")
+            temporary.write_text(state + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+        print(state)
+
+    def ptt_start():
+        session = active_session()
+        entry_id = next_id(session)
+        number = f"{entry_id:03d}"
+        transcript = session / ".data" / "transcripts" / f"{number}.txt"
+        shot = (runtime / "shots" / session.name / f"{number}.png").resolve()
+        ai_path = Path.home() / ".config" / "ui-notes" / "ai"
+        try:
+            ai_enabled = ai_path.read_text(encoding="utf-8").strip() != "off"
+        except OSError:
+            ai_enabled = True
+        subprocess.run(
+            ["voxtype", "record", "start", f"--file={transcript}"],
+            check=True,
+        )
+        try:
+            if not ai_enabled:
+                entry = {
+                    "id": entry_id,
+                    "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                    "ai": False,
+                    "status": "recording",
+                }
+                locked_rewrite(session, entry_id, lambda current: entry)
+                try_panel("reload")
+                return
+
+            shot.parent.mkdir(parents=True, exist_ok=True)
+            monitor_data = json.loads(subprocess.check_output(["hyprctl", "monitors", "-j"], text=True))
+            monitor = next(
+                (item["name"] for item in monitor_data if item.get("focused") is True),
+                monitor_data[0]["name"],
+            )
+            try_panel("hide")
+            time.sleep(0.05)  # let the compositor drop the unmapped layer before capture
+            try:
+                subprocess.run(["grim", "-o", monitor, str(shot)], check=True)
+            finally:
+                try_panel("show")
+
+            try:
+                window_data = json.loads(subprocess.check_output(["hyprctl", "activewindow", "-j"], text=True))
+                window = {"class": window_data.get("class", ""), "title": window_data.get("title", "")}
+            except (OSError, subprocess.SubprocessError, ValueError):
+                window = {"class": "", "title": ""}
+            entry = {
+                "id": entry_id,
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "shot": str(shot),
+                "window": window,
+                "status": "recording",
+                "context_status": "pending",
+            }
+            locked_rewrite(session, entry_id, lambda current: entry)
+        except BaseException:
+            try:
+                subprocess.run(["voxtype", "record", "cancel"], check=False)
+            except OSError:
+                pass
+            raise
+        try_panel("reload")
+        worker_command("analyze", entry_id, session)
+
+    def ptt_stop():
+        session = active_session()
+        try:
+            subprocess.run(["voxtype", "record", "stop"], check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            candidates = [
+                item
+                for item in read_entries(session)
+                if item.get("kind") != "section" and item.get("status") == "recording"
+            ]
+            if candidates:
+                entry_id = max(item["id"] for item in candidates)
+
+                def mark_no_transcript(current):
+                    if current is None:
+                        raise SystemExit(f"entry {entry_id} not found")
+                    updated = dict(current)
+                    updated["status"] = "no-transcript"
+                    return updated
+
+                locked_rewrite(session, entry_id, mark_no_transcript)
+            try_panel("reload")
+            message = " ".join(str(exc).splitlines())
+            print(f"ui-notes: voxtype record stop failed: {message}", file=sys.stderr)
+            raise SystemExit(1) from None
+        candidates = [
+            item
+            for item in read_entries(session)
+            if item.get("kind") != "section" and item.get("status") == "recording"
+        ]
+        if not candidates:
+            raise SystemExit("no recording entry")
+        entry_id = max(item["id"] for item in candidates)
+
+        def mark_transcribing(current):
+            if current is None:
+                raise SystemExit(f"entry {entry_id} not found")
+            updated = dict(current)
+            updated["status"] = "transcribing"
+            return updated
+
+        locked_rewrite(session, entry_id, mark_transcribing)
+        try_panel("reload")
+        worker_command("ingest", entry_id, session)
+
+    def validate_context(value):
+        if not isinstance(value, dict) or set(value) != {"title", "summary", "regions", "notable"}:
+            raise ValueError("context must contain exactly title, summary, regions, and notable")
+        if not isinstance(value["title"], str) or not isinstance(value["summary"], str):
+            raise ValueError("context title and summary must be strings")
+        if not isinstance(value["regions"], list) or not all(
+            isinstance(region, dict)
+            and set(region) == {"name", "contents"}
+            and isinstance(region["name"], str)
+            and isinstance(region["contents"], str)
+            for region in value["regions"]
+        ):
+            raise ValueError("context regions must contain name and contents strings")
+        if not isinstance(value["notable"], list) or not all(isinstance(item, str) for item in value["notable"]):
+            raise ValueError("context notable must be a list of strings")
+        return value
+
+    def extract_context(text):
+        try:
+            return validate_context(json.loads(text))
+        except (json.JSONDecodeError, ValueError) as first_error:
+            decoder = json.JSONDecoder()
+            for offset, character in enumerate(text):
+                if character != "{":
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(text[offset:])
+                    return validate_context(value)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            raise ValueError(f"could not parse Codex output as context JSON: {first_error}") from first_error
+
+    def analyze(entry_id):
+        session = active_session()
+        entry = next((item for item in read_entries(session) if item["id"] == entry_id), None)
+        if entry is not None and entry.get("kind") == "section":
+            raise SystemExit(f"entry {entry_id} is a section")
+        if entry is not None and entry.get("ai") is False:
+            raise SystemExit(f"entry {entry_id} is a plain entry")
+        number = f"{entry_id:03d}"
+        output_path = session / ".data" / "context" / f"{number}.json"
+        prompt_path = (project / "share" / "analyze-prompt.md").resolve()
+        schema_path = (project / "share" / "analyze-schema.json").resolve()
+        if entry is not None and entry.get("shot"):
+            shot_path = Path(entry["shot"])
+        else:
+            shot_path = (runtime / "shots" / session.name / f"{number}.png").resolve()
+        log_path = session / ".data" / "logs" / f"analyze-{number}.log"
+        effort = os.environ.get("UI_NOTES_REASONING", "low")
+        command = [
+            "codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-C", str(session),
+            "-i", str(shot_path), "--output-schema", str(schema_path),
+            "-o", str(output_path), "-c", f'model_reasoning_effort="{effort}"',
+        ]
+        model = os.environ.get("UI_NOTES_MODEL")
+        if model:
+            command.extend(["-m", model])
+        command.append("-")
+        try:
+            error = None
+            context = None
+            try:
+                with prompt_path.open("rb") as prompt, log_path.open("ab", buffering=0) as log:
+                    result = subprocess.run(
+                        command,
+                        stdin=prompt,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        timeout=240,
+                    )
+                if result.returncode:
+                    raise RuntimeError(f"codex exited with status {result.returncode}")
+                context = extract_context(output_path.read_text(encoding="utf-8"))
+                output_path.write_text(json.dumps(context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except Exception as exc:
+                error = str(exc)
+                try:
+                    with log_path.open("a", encoding="utf-8") as log:
+                        log.write(f"\nui-notes analyze error: {error}\n")
+                except OSError:
+                    pass
+
+            def apply_context(current):
+                if current is None:
+                    updated = {
+                        "id": entry_id,
+                        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                        "shot": str(shot_path),
+                        "status": "no-transcript",
+                    }
+                else:
+                    updated = dict(current)
+                if error is None:
+                    updated["context"] = context
+                    updated["context_status"] = "done"
+                else:
+                    updated["context_status"] = "error"
+                return updated
+
+            session = resolve_session_path() or session
+            locked_rewrite(session, entry_id, apply_context)
+            try_panel("reload")
+            if error is not None:
+                print(error, file=sys.stderr)
+                raise SystemExit(1)
+        finally:
+            try:
+                delay = shot_path.stat().st_mtime + SHOT_RETENTION_SECONDS - time.time()
+            except FileNotFoundError:
+                delay = 0
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                shot_path.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                shot_path.parent.rmdir()
+            except OSError:
+                pass
+
+    def ingest(entry_id):
+        session = active_session()
+        entry = next((item for item in read_entries(session) if item["id"] == entry_id), None)
+        if entry is not None and entry.get("kind") == "section":
+            raise SystemExit(f"entry {entry_id} is a section")
+        number = f"{entry_id:03d}"
+        transcript_path = session / ".data" / "transcripts" / f"{number}.txt"
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        state_path = Path(xdg_runtime) / "voxtype" / "state" if xdg_runtime else Path(f"/tmp/voxtype-{os.getuid()}") / "state"
+        started_at = time.monotonic()
+        deadline = started_at + 120
+        transcript = None
+        idle_since = None
+        wait_branch = "timeout"
+        while time.monotonic() < deadline:
+            try:
+                candidate = transcript_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                candidate = ""
+            try:
+                state = state_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                idle_since = None
+                state = None
+
+            now = time.monotonic()
+            if candidate and state == "idle":
+                transcript = candidate
+                wait_branch = "success"
+                break
+            if state == "idle":
+                if idle_since is None:
+                    idle_since = now
+                if not candidate and now - idle_since >= 1.5 and now - started_at >= 3:
+                    wait_branch = "idle-without-transcript"
+                    break
+            else:
+                idle_since = None
+            time.sleep(0.2)
+
+        elapsed = time.monotonic() - started_at
+        session = resolve_session_path() or session
+        log_path = session / ".data" / "logs" / f"ingest-{number}.log"
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"ui-notes ingest: {wait_branch} after {elapsed:.2f}s\n")
+
+        def apply_transcript(current):
+            if current is None:
+                raise SystemExit(f"entry {entry_id} not found")
+            updated = dict(current)
+            if transcript is None:
+                updated["status"] = "no-transcript"
+            else:
+                updated["transcript"] = transcript
+                updated["status"] = "done"
+            return updated
+
+        locked_rewrite(session, entry_id, apply_transcript)
+        try_panel("reload")
+
+    argv = sys.argv[1:]
+    command = argv[0] if argv else ""
+    if command in ("help", "-h", "--help") and len(argv) == 1:
+        print(
+            """usage: ui-notes <command> [args]
+
+commands:
+  start [name]         start a session (and open the panel)
+  stop                 end the active session
+  toggle               start a session, or end the active one
+  status               print the active session path, or "inactive"
+  section [title]      add a section to the active session
+  relocate <dir>       move the active session into <dir>
+  ai [on|off|toggle]   print or change the screenshot-analysis mode
+  ptt start|stop       push-to-talk press / release (passes through to voxtype when inactive)
+  render               regenerate notes.md for the active session
+  panel <cmd>          hide | show | reload | restyle | quit | ping
+  analyze <id>         internal worker: describe a screenshot
+  ingest <id>          internal worker: collect a transcript"""
+        )
+    elif command == "start" and len(argv) <= 2:
+        start(argv[1] if len(argv) == 2 else None)
+    elif command == "stop" and len(argv) == 1:
+        stop()
+    elif command == "toggle" and len(argv) == 1:
+        stop() if active_session(required=False) else start()
+    elif command == "status" and len(argv) == 1:
+        session = active_session(required=False)
+        if session:
+            print(session)
+        else:
+            print("inactive")
+            raise SystemExit(1)
+    elif command == "section" and len(argv) <= 2:
+        section(argv[1] if len(argv) == 2 else None)
+    elif command == "relocate" and len(argv) == 2:
+        relocate(argv[1])
+    elif command == "ai" and len(argv) <= 2 and (len(argv) == 1 or argv[1] in ("on", "off", "toggle")):
+        ai(argv[1] if len(argv) == 2 else None)
+    elif command == "ptt" and len(argv) == 2 and argv[1] == "start":
+        ptt_start()
+    elif command == "ptt" and len(argv) == 2 and argv[1] == "stop":
+        ptt_stop()
+    elif command == "analyze" and len(argv) == 2 and argv[1].isdigit() and int(argv[1]) > 0:
+        analyze(int(argv[1]))
+    elif command == "ingest" and len(argv) == 2 and argv[1].isdigit() and int(argv[1]) > 0:
+        ingest(int(argv[1]))
+    elif command == "render" and len(argv) == 1:
+        render(active_session())
+    elif command == "panel" and len(argv) == 2 and argv[1] in ("hide", "show", "reload", "quit", "ping", "restyle"):
+        try:
+            print(json.dumps(panel_request(argv[1]), separators=(",", ":")))
+        except (OSError, ValueError, TimeoutError, ConnectionError, RuntimeError) as exc:
+            print(f"panel not running: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+    else:
+        print(f"ui-notes: invalid command: {' '.join(argv)}", file=sys.stderr)
+        print("run 'ui-notes help'", file=sys.stderr)
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

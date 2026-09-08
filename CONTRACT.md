@@ -1,204 +1,161 @@
-# ui-notes — component contract (v6)
+# UI Notes component contract
 
-Goal: a small floating notes panel over a full-screen Chrome page showing a mock HTML UI.
-Holding HOME dictates (voxtype). While a ui-notes session is active, each HOME press also
-takes a screenshot (with the panel hidden), sends it to Codex for a factual description of
-the screen, and stores description + spoken comment as one entry. The user only speaks
-opinions; the screen context is filled in automatically. Output is one Markdown file.
+The Quickshell frontend is a keep-loaded Omarchy panel. Rust owns persistence,
+CLI operations, dictation, captures, and analysis. Dictation is delegated to the
+`voxtype` command, captures to `grim` and `slurp`, and analysis to `codex exec`
+running in read-only sandbox mode with the screenshot attached and the project
+folder as its working directory. Those tools are the only paths by which data
+leaves the machine, and each is optional. The migration keeps the project
+storage format and existing `ui-notes` commands.
 
-Two components, each built by a separate delegate. This file is the seam.
+## Components
 
-## Paths
+- `manifest.json` declares `cordrogue.ui-notes`, kind `panel`, entry point
+  `Plugin.qml`, and `keepLoaded: true`.
+- `Plugin.qml` and `qml/` run in the existing `omarchy-shell` process. They own
+  windows, focus, editor state, search, shortcuts, and the panel socket.
+- `src/bin/ui-notes.rs` provides the CLI and invokes `src/backend.rs` for
+  `ui-notes backend`, a persistent stdin/stdout JSON process owned by QML.
+- `src/core.rs` holds shared paths, atomic persistence, locking, and Markdown
+  rendering. `src/keyboard.rs` loads shortcut overrides.
+- `src/bin/ui-notes-panel.rs` summons this plugin through Omarchy shell IPC.
+  It does not start another Quickshell process.
+- `bin/ui-notes` and `bin/ui-notes-panel` are regular wrapper files that run the
+  corresponding binary under `target/release/`. Plugin folders cannot contain
+  symlinks. External CLI links in `~/.local/bin` point to these wrappers.
 
-- Project: `~/Work/ui-notes/`
-  - `bin/ui-notes` — CLI (Python 3, stdlib only, shebang `#!/usr/bin/python3`)
-  - `bin/ui-notes-panel` — GTK4 panel (Python 3, `#!/usr/bin/python3`, gi Gtk 4.0 +
-    Gtk4LayerShell 1.0; only /usr/bin/python3 has gi, NOT the mise python). It re-execs
-    itself with `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so`, which Python/gi needs.
-  - `share/analyze-prompt.md`, `share/analyze-schema.json` — Codex prompt + output schema
-  - `share/ui-notes-theme-hook` — Omarchy theme-set hook, runs `ui-notes panel restyle`
-  - `install.sh` — symlinks both bins into `~/.local/bin`, installs the hook via
-    `omarchy hook install theme-set`
-- Sessions: `~/Documents/ui-notes/<YYYYMMDD-HHMMSS>[-<name>]/` (or wherever `relocate` moved it)
-  - `notes.md` — the deliverable, rendered from entries.jsonl. The session dir should look
-    like "one Markdown file"; everything else is hidden:
-  - `.data/entries.jsonl` — one JSON object per line, one per record id, **the source of truth**
-  - `.data/id` — random session token written by `start`; lets detached workers follow a `relocate` (below)
-  - `.data/transcripts/<NNN>.txt`, `.data/context/<NNN>.json`, `.data/logs/`
-  - Screenshots are never written under the session dir.
-- Runtime: `$XDG_RUNTIME_DIR/ui-notes/` (fallback `/tmp/ui-notes-$UID`)
-  - `session` — text file with the absolute path of the active session dir. Absent = inactive.
-  - `panel.sock` — Unix stream socket the panel listens on
-  - `lock` — flock file guarding entries.jsonl rewrites
-  - `shots/<session-basename>/<NNN>.png` — screenshots (tmpfs) while they are needed (Codex
-    input, the panel's transient preview popup). **TTL: 5 minutes.** Each `analyze` worker,
-    after finishing, sleeps until 300 s after the shot's mtime, then unlinks it and removes
-    its parent dir if empty. `stop` does not delete shots. `start` deletes everything under `shots/`.
+The frontend normally resolves its backend relative to the plugin directory.
+`UI_NOTES_EXECUTABLE` can override that backend path for development.
 
-## entries.jsonl records
+## Project storage
 
-Entry:
-```json
-{"id": 3, "ts": "2026-09-03T23:58:10", "shot": "/run/user/1000/ui-notes/shots/20260904-001106-e2e/003.png",
- "window": {"class": "chromium", "title": "Dashboard mock - Chromium"},
- "status": "recording|transcribing|done|no-transcript",
- "context_status": "pending|done|error",
- "context": {"title": "...", "summary": "...", "regions": [{"name": "...", "contents": "..."}], "notable": ["..."]},
- "transcript": "what the user said (may be edited in the panel)"}
-```
-Section (shares the id sequence and the file; groups the entries that follow it in id order):
-```json
-{"id": 4, "kind": "section", "ts": "2026-09-04T01:20:00", "title": "Checkout flow"}
-```
-A record without `kind` is an entry. `id` is a 1-based integer, zero-padded to 3 digits in
-filenames. Fields are absent until known. `shot` is an ABSOLUTE path and the file may be gone.
+Each selected project contains:
 
-AI toggle (v5): `~/.config/ui-notes/ai` holds `on` or `off` (missing = on). When off, an
-entry is a plain note: `{"id": 5, "ts": "...", "ai": false, "status": "recording|transcribing|done|no-transcript", "transcript": "..."}`
-— no `shot`, no `window`, no `context_status`, no `context`.
+| Path | Meaning |
+| --- | --- |
+| `notes.md` | Derived Markdown deliverable |
+| `.data/entries.jsonl` | Authoritative note and section records |
+| `.data/id` | Stable session identity, derived from PID and creation time |
+| `.data/draft.txt` | Unfinished new note, excluded from Markdown |
+| `.data/transcripts/`, `.data/context/`, `.data/logs/` | Worker output |
+| `assets/clip-<timestamp>.png` | Permanent rectangle captures |
 
-### Rewrite protocol (both sides)
+An entry has a positive integer `id`, timestamp, transcript, and status. AI
+entries can also carry a screen image path, window information, analysis status,
+and structured context. Plain entries use `ai: false`. A section has the same
+ID sequence with `kind: "section"` and a title. Section deletion preserves its
+notes. Clip assets use paths relative to the project, keeping folders portable.
 
-Any writer MUST: `flock` the runtime `lock` file, read all lines, replace every line with the
-matching `id` (collapsing duplicates) or append, write `entries.jsonl.tmp`, `os.replace` over
-`entries.jsonl`, release. Never append blindly; never truncate other ids. The only allowed
-deletion is a section record (entries are never deleted). The CLI regenerates `notes.md`
-after each rewrite it performs; the panel spawns `ui-notes render` (detached) after each
-rewrite it performs, so notes.md always matches entries.jsonl.
+Every writer of `entries.jsonl` holds the shared runtime flock, reads current
+records, updates the intended ID, and atomically replaces the file. Worker
+output files and external tool output are written outside that lock. Markdown renders from those
+records. Drafts save separately. The backend requires both expected project path
+and session token for every editor mutation, so a delayed save cannot land in a
+different project. Project switching saves pending edits first and rejects an
+outgoing recording or transcription.
 
-## Panel socket protocol
+The selected project must have a valid UI Notes session or be free of conflicting
+`notes.md` and `.data` content. Creation and switching preserve unrelated files.
+Existing GTK sessions use this same format and need no data migration.
 
-Line-delimited JSON over `panel.sock`; one JSON reply per request.
+## Runtime and user state
 
-- `{"cmd":"hide"}` → panel unmaps its surface AND the screenshot popup (must be invisible to
-  grim); replies `{"ok":true}` only after GTK has unmapped (iterate the main context until
-  idle). The CLI still sleeps ~50 ms afterwards so the compositor renders a frame without
-  the layer before grim reads it.
-- `{"cmd":"show"}` → remaps the panel (not the popup), `{"ok":true}`.
-- `{"cmd":"reload"}` → re-read entries.jsonl, `{"ok":true}` (belt-and-braces; the panel also
-  watches the `.data` dir with Gio.FileMonitor).
-- `{"cmd":"restyle"}` → re-resolve the Omarchy theme and reapply CSS, `{"ok":true}`.
-- `{"cmd":"quit"}` → flush pending edits synchronously, exit.
-- `{"cmd":"ping"}` → `{"ok":true,"pid":N}`.
+Runtime files live under `$XDG_RUNTIME_DIR/ui-notes`, or `/tmp/ui-notes-$UID` when
+XDG runtime storage is unset. `session` holds the active absolute project path,
+`lock` coordinates writers, and `panel.sock` carries CLI requests to QML.
+Full-screen AI images live under `shots/`. A detached cleanup process deletes
+each one about five minutes after capture; the deletion is best effort and a
+failure before the analysis worker launches can leave a file for `start` to
+clear later. They do not become permanent project assets. The CLI's `start`
+command clears old runtime captures. `stop` never erases notes or clips in a
+project you chose; it does remove an auto-named project under
+`~/Documents/ui-notes` when that project has no records, draft, or assets.
 
-## CLI commands (`ui-notes`)
+Known projects live at `$XDG_STATE_HOME/ui-notes/projects.json`, defaulting to
+`~/.local/state/ui-notes/projects.json`. AI mode lives at
+`~/.config/ui-notes/ai`. Shortcut overrides use
+`$XDG_CONFIG_HOME/ui-notes/keys.toml`, defaulting to
+`~/.config/ui-notes/keys.toml`. Missing AI configuration means enabled.
 
-- `start [name]` — clear `shots/`, create the session dir (`notes.md`, `.data/…`, `.data/id`), write the
-  runtime `session` file atomically, launch the panel if `ping` fails (two 250 ms attempts;
-  panel spawned detached with stdio → DEVNULL). Also launches the panel when called on an
-  already-active session.
-- `stop` — remove `session`, send `quit` to the panel. If the session dir is directly under
-  `~/Documents/ui-notes`, is named `<YYYYMMDD-HHMMSS>…`, and has no entries and no transcript
-  files, the whole dir is deleted (an untouched session leaves nothing behind). Never deletes
-  a relocated session.
-- `toggle` — start if inactive else stop. (Bound to SUPER+SHIFT+U.)
-- `status` — print the active session path or `inactive`; exit 1 if inactive.
-- `ptt start` / `ptt stop` — bound to HOME press / release.
-  - Inactive: `os.execvp` into `voxtype record start|stop` before any heavy import. This
-    path must stay fast and must never break plain dictation.
-  - Active, AI off: allocate id N; `voxtype record start --file=…/NNN.txt`; write the plain
-    entry (`ai: false`, status recording). No hide/grim/show, no analyze. `stop` is unchanged.
-  - Active, AI on, `start`: allocate id N; `voxtype record start --file=<session>/.data/transcripts/NNN.txt`
-    FIRST (so speech is not lost); panel `hide` → sleep 50 ms → `grim -o <focused monitor>
-    <runtime>/shots/<session>/NNN.png` (the `hyprctl monitors -j` entry with `focused: true`, else the first) → panel `show`; read `hyprctl activewindow -j`; write
-    the entry (status recording, context_status pending); spawn detached `analyze N`. If
-    anything fails after voxtype started and before the entry is written, run
-    `voxtype record cancel` (best effort) and re-raise; a failed `analyze` spawn marks
-    context_status error.
-  - Active, `stop`: `voxtype record stop` (on failure mark the latest recording ENTRY
-    no-transcript); set it transcribing; spawn detached `ingest N`.
-- `analyze N` — `codex exec --skip-git-repo-check --sandbox read-only -C <session> -i <shot>
-  --output-schema` (`<shot>` is the entry's own `shot` path) ` share/analyze-schema.json -o .data/context/NNN.json -c model_reasoning_effort="low" - < share/analyze-prompt.md`
-  with a 240 s timeout. Parse the JSON (extract the first `{…}` block if Codex wrote prose);
-  set context + context_status done, or context_status error (dropping any stale context).
-  Refuses a section id or a missing entry. Then the 5-minute shot TTL wait + delete.
-  Env `UI_NOTES_REASONING` overrides the effort; `UI_NOTES_MODEL` adds `-m`.
-- `ingest N` — poll every 200 ms: success when `.data/transcripts/NNN.txt` is non-empty and
-  voxtype's state file (`$XDG_RUNTIME_DIR/voxtype/state`) reads `idle` → set transcript,
-  status done. Fast fail: state has read `idle` continuously for 1.5 s with no non-empty file
-  and ≥3 s elapsed → status no-transcript (voxtype writes no file for an empty
-  transcription). Hard cap 120 s → no-transcript. Logs the branch taken.
-- `render` — regenerate notes.md from entries.jsonl.
-- `section [title]` — append a section record (default title `Section K`, K = existing
-  sections + 1), render, print the new id.
-- `relocate <dir>` — move the active session (`notes.md` and `.data/`) into `<dir>` (an
-  existing directory outside the session that holds neither `notes.md` nor `.data`), point
-  the runtime `session` file at `<dir>` atomically, print the new path; all of it under the
-  runtime `lock`. Absolute `shot` paths are untouched; new shots go under `shots/<new basename>/`.
-  The panel follows via its 1 s poll.
-  Detached workers (`analyze`, `ingest`) are spawned with `UI_NOTES_SESSION_PATH` and
-  `UI_NOTES_SESSION_ID` (the `.data/id` token). Before writing, a worker re-resolves its session:
-  the pinned path if it still has `.data/entries.jsonl`, else the runtime `session` path when its
-  `.data/id` matches the token. So a relocate while analysis or transcription is in flight loses
-  nothing.
-- `ai [on|off|toggle]` — read or set `~/.config/ui-notes/ai`; always prints `on` or `off`.
-  Exit 0. (No argument = print current state.)
-- `panel hide|show|reload|restyle|quit|ping` — thin socket client.
-- `help` / `-h` / `--help` — usage. An unknown command or bad arity prints `ui-notes: invalid
-  command: …` plus `run 'ui-notes help'` to stderr and exits 2.
+## Backend JSON protocol
 
-## notes.md format (simple, with optional sections)
+QML starts `ui-notes backend` with stdin enabled. Each request and reply occupies
+one JSON line. Requests carry an `id`, echoed in their reply. Success uses
+`ok: true`; failures use `ok: false` and `error`. A successful write may include a
+`warning` when entries saved but Markdown rendering or state refresh failed.
+The frontend must not retry an already saved note solely because of that warning.
 
-```
-# UI review — <session name> · <YYYY-MM-DD>
+| Command | Request fields | Behavior |
+| --- | --- | --- |
+| `snapshot` | `id`, `cmd`, optional `poll` | Read current project, token, entries, draft, AI mode, known projects, shortcuts, runtime path, theme |
+| `draft` | `session`, `token`, `text` | Atomically persist the unfinished editor text |
+| `note` | `session`, `token`, `text` | Add a plain note and clear its draft |
+| `edit` | `session`, `token`, `entryId`, `text` | Change transcript or section title |
+| `delete-section` | `session`, `token`, `entryId` | Remove only the section heading |
+| `delete-note` | `session`, `token`, `entryId` | Remove a finished note while retaining its stored assets |
 
-## <section title>                       (one per section record, in id order)
+Write requests also include `id` and `cmd`. A snapshot is returned as `state`
+when available. Empty notes, stale project identity, missing records, and edits
+to recording/transcribing notes fail without switching projects.
 
-### 1. <context.title, or "Entry 1" while pending>
-<context.summary>            (one paragraph; "_analysis pending…_" / "_analysis failed_" otherwise)
+With `poll: true`, a snapshot checks a metadata stamp against the last successful
+full snapshot, including snapshots attached to mutation replies. If unchanged,
+the reply contains `ok: true` and `unchanged: true` with no `state`; otherwise it
+returns a full snapshot. Snapshots without `poll: true` always return `state` on
+success.
 
-> <transcript>               (blockquote; "_transcribing…_" or "_no transcript_" otherwise)
-```
+Operations already exposed by the CLI, such as select/create project, clips,
+sections, AI mode, and stopping, use argument arrays through Quickshell's Process
+API. User text and paths must not be interpolated into a shell command.
 
-Entries use `##` when the file has no section records at all, `###` otherwise. Entries that
-precede the first section render before any section header. A plain entry (`ai: false`)
-renders as just its transcript as a normal paragraph (no heading, no blockquote; the
-placeholders `_transcribing…_` / `_no transcript_` still apply). Nothing else: no images, no
-window titles, no regions, no notable lists (those stay in `.data/context/NNN.json`).
+## Panel socket and shell lifecycle
 
-## Omarchy theming (panel)
+The panel socket accepts one JSON request per line and returns one JSON reply.
+The public CLI uses this socket for its existing commands.
 
-Resolve the palette at startup and on `restyle`:
-1. `name` = output of `omarchy theme current`; `slug` = name lower-cased, spaces → `-`.
-2. colors file = first existing of `~/.config/omarchy/themes/<slug>/colors.toml`,
-   `/usr/share/omarchy/themes/<slug>/colors.toml`, `$(omarchy theme dir <name>)/colors.toml`.
-   Parse with `tomllib`. Keys used: `background`, `dark_background`, `darker_background`,
-   `lighter_background`, `foreground`, `dark_foreground`, `muted`, `accent`, `selection`,
-   `red`, `yellow`, `green`, `blue`.
-3. Font: `omarchy font current`; base size from `[font] base-size` in
-   `~/.config/omarchy/shell.toml`, default 11. Subprocess timeout 2 s.
-4. If anything fails, fall back to the Gand values hard-coded as defaults; never crash.
+- `ping` reports readiness and the shared Quickshell process ID.
+- `focus` reports whether the panel holds keyboard focus and which editor is
+  active. AI dictation captures only when the new-note editor is active.
+- `hide` hides the panel and preview before acknowledging capture readiness.
+  The CLI also waits briefly for the compositor before running `grim`.
+- `show` restores the panel and previous focus intent after capture.
+- `toggle-focus` keeps the panel visible while transferring keyboard focus
+  between UI Notes and the previously focused Hyprland application.
+- `reload` refreshes the backend snapshot; `restyle` remains a compatibility call.
+- `flush` saves pending drafts and edits.
+- `quit` saves before hiding. A failed save returns `ok: false` and leaves the
+  panel available. It never quits the shared Omarchy shell.
+- `open` focuses the project controls and refreshes state.
 
-Look (v4, "sharp + small"): solid `background` panel (alpha 1.0), solid `lighter_background`
-cards, 0 radius everywhere, 1 px hairlines in `foreground` at ~0.25 alpha, no fills on idle
-controls, accent only on focus. **Size:** 320 px wide, anchored TOP+RIGHT only (12 px margins);
-height follows content up to 70 % of the monitor height, then the list scrolls. Header: four
-glyph buttons right-aligned — AI toggle (nf-md-creation U+F0674; a `Gtk.ToggleButton`
-whose active state mirrors `~/.config/ui-notes/ai`, accent-colored glyph when on, muted
-when off; clicking runs `ui-notes ai toggle`; the panel re-reads the file on its 1 s poll),
-`+` new section (runs `ui-notes section`), folder (native `Gtk.FileDialog.select_folder`,
-then `ui-notes relocate <dir>`), `✕` end session. A plain entry card (`ai: false`) has no
-title row: just the stripe, the transient status word, and the transcript editor. Section
-rows: a flat hairline row with the title in an inline editable field (saved via the rewrite
-protocol) and a small `✕` that deletes the section record. Cards (5 px padding): 2 px left status stripe
-(recording → `red`, transcribing/pending → `yellow`, done → `green`, no transcript → `muted`,
-error → `red`) + a small muted uppercase status word only while transient or wrong (REC,
-TRANSCRIBING, ANALYZING, NO TRANSCRIPT, ERROR; none when finished), context title (small,
-`muted`, ≤2 lines; the user's comment is the primary text), transcript editor (`foreground`,
-base size). While the transcript is empty the editor is one line tall and shows a muted
-placeholder (`listening…` / `transcribing…` / `no transcript`) that disappears on text or
-focus; with text it grows to 120 px then scrolls. No thumbnails in cards. Empty state: one
-muted line, `no session`.
+Omarchy invokes the plugin's `open(payloadJson)` and `close()` lifecycle methods.
+`omarchy-shell shell summon cordrogue.ui-notes '{}'` opens it and
+`omarchy-shell shell hide cordrogue.ui-notes` hides it. `keepLoaded` leaves the
+backend loaded while the window is closed; the socket listens only while the
+plugin is open. Disable unloads the plugin.
+Install and uninstall ask the current panel to save before modifying loaded code.
 
-**Focus:** the panel opens with nothing focused (GTK's map-time grab is cleared, so no field
-looks pre-selected). `hide`/`show` restores whatever had focus before the capture. A section
-record that arrives more than 2 s after the panel opened (i.e. the user pressed `+`) gets its
-title focused with the text selected, so typing replaces `Section K`. The section `✕` is only
-visible while the pointer is over the row.
+## Appearance and shortcuts
 
-**Screenshot popup:** when a reload brings in a new entry whose `shot` file exists, a second
-layer-shell surface (namespace `ui-notes-shot`, OVERLAY, anchored TOP+RIGHT, right margin =
-panel width + 24 so it sits just left of the panel) shows the screenshot ~360 px wide inside
-a hairline, stays ~4 s, fades out (CSS opacity transition), then unmaps — like a notification.
-Entries present at startup never pop up. Hyprland layer rule (`~/.config/hypr/ui-notes.lua`):
-`namespace = "^ui-notes"` gets `no_anim` so both surfaces unmap instantly for captures.
+The panel preserves the GTK layout and resolves the same colors and typography
+in Rust through `src/theme.rs`. Ghostty's effective configuration takes precedence,
+with the current Omarchy palette and font as fallbacks. The backend caches this
+result and refreshes it when a source file fingerprint changes. Snapshot `theme`
+contains Qt-compatible colors, font family, and point sizes. No GTK dependency or
+CSS provider is required. The installer adds no theme hooks.
+
+All panel windows use the overlay layer so they remain visible over ordinary
+fullscreen applications. While Omarchy's `org.omarchy.screensaver` window is
+present, they move to the top layer and release their keyboard focus grab. This
+places them behind the native fullscreen screensaver without closing the panel
+or discarding editor state; the overlay layer and prior focus intent return when
+the screensaver closes. On the panel's monitor, a fullscreen workspace ignores
+Omarchy's top and right bar reservations, using a 4 pixel top gap and 12 pixel right gap.
+Otherwise, a visible top or right bar adds its size to the matching gap.
+
+Shortcuts retain `share/keys.toml` compatibility. Rust translates GTK accelerator
+notation into Qt sequences for the frontend. Invalid override files fall back to
+defaults and expose a warning. The QML help panel shows effective shortcuts.
+`cycle_opacity` defaults to Ctrl+Shift+O and cycles all panel windows and popup
+controls through 100%, 80%, 60%, and 40% opacity without persisting the value.
+Theme and font updates use the original source files; runtime behavior should be
+verified on the supported Omarchy version before release.

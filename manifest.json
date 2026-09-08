@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "cordrogue.ui-notes",
+  "name": "UI Notes",
+  "version": "0.2.0",
+  "author": "cordrogue",
+  "license": "MIT",
+  "description": "Floating project notes with dictation and screen captures, backed by Rust.",
+  "kinds": ["panel"],
+  "entryPoints": { "panel": "Plugin.qml" },
+  "keepLoaded": true
+}

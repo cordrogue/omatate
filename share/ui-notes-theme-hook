@@ -1,5 +1,5 @@
 #!/bin/bash
 set -u
 
-# The theme slug is passed in $1 and is intentionally unused.
+# A theme slug or font name may be passed in $1 and is intentionally unused.
 ui-notes panel restyle >/dev/null 2>&1 || true

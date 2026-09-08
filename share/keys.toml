@@ -1,0 +1,28 @@
+# Copy this file to $XDG_CONFIG_HOME/ui-notes/keys.toml.
+# If XDG_CONFIG_HOME is unset, use ~/.config/ui-notes/keys.toml.
+# Remove actions you do not want to override. Use [] to disable an action.
+# Duplicate bindings are rejected. Escape and Tab are reserved, as are bare printable
+# keys and printable keys modified only by Shift.
+# The Quickshell panel reloads these overrides with its next backend snapshot.
+# Qt sequences such as Ctrl+S and legacy GTK accelerator notation below are accepted.
+# Rust translates the legacy notation to Qt shortcuts.
+
+[keys]
+save_note = ['<Control>Return', '<Control>s']
+delete_note = ['<Control>Delete']
+focus_note = ['<Control>n']
+search = ['<Control>f']
+projects = ['<Control>p']
+new_project = ['<Control><Shift>n']
+open_folder = ['<Control>o']
+add_section = ['<Control><Shift>s']
+clip = ['<Control><Shift>c']
+toggle_ai = ['<Control><Shift>a']
+cycle_opacity = ['<Control><Shift>o']
+minimize = ['<Control>m']
+end_session = ['<Control><Shift>w']
+previous_entry = ['<Alt>Up']
+next_entry = ['<Alt>Down']
+preview = ['<Alt>Return']
+expand_note = ['<Alt><Shift>Return']
+help = ['<Control>h', 'F1']

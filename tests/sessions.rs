@@ -32,7 +32,7 @@ impl Fixture {
         for p in [&home, &runtime, &bin] {
             fs::create_dir_all(p).unwrap()
         }
-        script(&bin.join("ui-notes-panel"), "#!/bin/sh\nexit 0\n");
+        script(&bin.join("omatate-panel"), "#!/bin/sh\nexit 0\n");
         script(&bin.join("omarchy-shell"), "#!/bin/sh\necho ok\n");
         script(&bin.join("omarchy"), "#!/bin/sh\nexit 1\n");
         script(&bin.join("ghostty"), "#!/bin/sh\nexit 1\n");
@@ -45,7 +45,7 @@ impl Fixture {
         }
     }
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ui-notes"))
+        Command::new(env!("CARGO_BIN_EXE_omatate"))
             .args(args)
             .env("HOME", &self.home)
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
@@ -937,13 +937,32 @@ fn section_ai_help_invalid_and_render_contract() {
             .unwrap()
             .contains("## Checkout")
     );
-    assert_eq!(text(&f.ok(&["ai"]).stdout), "on\n");
-    assert_eq!(text(&f.ok(&["ai", "toggle"]).stdout), "off\n");
+    assert_eq!(text(&f.ok(&["ai"]).stdout), "off\n");
+    assert_eq!(text(&f.ok(&["ai", "toggle"]).stdout), "on\n");
     assert_eq!(text(&f.ok(&["ai", "off"]).stdout), "off\n");
-    assert!(text(&f.ok(&["help"]).stdout).contains("usage: ui-notes"));
+    assert!(text(&f.ok(&["help"]).stdout).contains("usage: omatate"));
     let bad = f.run(&["bogus"]);
     assert_eq!(bad.status.code(), Some(2));
-    assert!(text(&bad.stderr).contains("run 'ui-notes help'"))
+    assert!(text(&bad.stderr).contains("run 'omatate help'"))
+}
+
+#[test]
+fn ai_requires_explicit_opt_in_and_preserves_legacy_preference() {
+    let f = Fixture::new();
+    assert_eq!(text(&f.ok(&["ai"]).stdout), "off\n");
+    let config = f.home.join(".config/ui-notes/ai");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    for (value, expected) in [
+        ("", "off\n"),
+        ("invalid", "off\n"),
+        ("off\n", "off\n"),
+        ("on\n", "on\n"),
+    ] {
+        fs::write(&config, value).unwrap();
+        assert_eq!(text(&f.ok(&["ai"]).stdout), expected);
+    }
+    f.ok(&["ai", "off"]);
+    assert_eq!(fs::read_to_string(config).unwrap(), "off\n");
 }
 
 #[test]
@@ -974,11 +993,15 @@ fn ingest_with_fake_voxtype_state_preserves_concurrent_fields() {
 }
 
 #[test]
-fn ptt_ai_off_uses_file_and_creates_plain_recording_entry() {
+fn ptt_defaults_to_plain_dictation_without_capture_or_codex() {
     let f = Fixture::new();
     let s = f.make_session("20260904-120000-x", None, true);
-    fs::create_dir_all(f.home.join(".config/ui-notes")).unwrap();
-    fs::write(f.home.join(".config/ui-notes/ai"), "off\n").unwrap();
+    for command in ["grim", "codex", "hyprctl"] {
+        script(
+            &f.bin.join(command),
+            "#!/bin/sh\ntouch \"$HOME/unexpected-ai-command\"\nexit 99\n",
+        );
+    }
     script(
         &f.bin.join("voxtype"),
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HOME/voxtype-args\"\nexit 0\n",
@@ -989,6 +1012,7 @@ fn ptt_ai_off_uses_file_and_creates_plain_recording_entry() {
     });
     f.ok(&["ptt", "start"]);
     h.join().unwrap();
+    assert!(!f.home.join("unexpected-ai-command").exists());
     let args = fs::read_to_string(f.home.join("voxtype-args")).unwrap();
     assert!(args.contains("record start --file="));
     assert!(args.contains(".data/transcripts/001.txt"));
@@ -1026,7 +1050,7 @@ fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 impl Fixture {
     fn backend(&self, requests: &[Value]) -> Vec<Value> {
         use std::process::Stdio;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ui-notes"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_omatate"))
             .arg("backend")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
@@ -1223,7 +1247,7 @@ fn backend_saved_note_remains_success_with_bad_registry_and_markdown_failure() {
 #[test]
 fn launcher_uses_sibling_and_rejects_unknown_plugin_response() {
     let f = Fixture::new();
-    script(&f.bin.join("ui-notes-panel"), "#!/bin/sh\nexit 42\n");
+    script(&f.bin.join("omatate-panel"), "#!/bin/sh\nexit 42\n");
     // The sibling Rust launcher must win over a legacy PATH executable.
     f.ok(&["open"]);
     script(&f.bin.join("omarchy-shell"), "#!/bin/sh\necho unknown\n");
@@ -1243,7 +1267,7 @@ fn backend_theme_refreshes_ghostty_only_when_a_source_changes() {
         &f.bin.join("ghostty"),
         "#!/bin/sh\nprintf x >> \"$HOME/ghostty-calls\"\ncat \"$HOME/.config/ghostty/config\"\n",
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ui-notes"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omatate"))
         .arg("backend")
         .env("HOME", &f.home)
         .env("XDG_CONFIG_HOME", f.home.join(".config"))

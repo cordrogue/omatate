@@ -1,3 +1,4 @@
+use omatate::core;
 use serde_json::{Value, json};
 use std::env;
 use std::fmt;
@@ -10,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use ui_notes::core;
 #[path = "../backend.rs"]
 mod backend;
 #[path = "../keyboard.rs"]
@@ -80,11 +80,11 @@ fn launch_panel(request: &str) -> Result<(), String> {
     let exe = env::current_exe()
         .ok()
         .and_then(|p| {
-            let sibling = p.with_file_name("ui-notes-panel");
+            let sibling = p.with_file_name("omatate-panel");
             sibling.is_file().then_some(sibling)
         })
-        .or_else(|| find_program("ui-notes-panel"))
-        .ok_or("cannot find ui-notes-panel")?;
+        .or_else(|| find_program("omatate-panel"))
+        .ok_or("cannot find omatate-panel")?;
     let mut c = Command::new(exe);
     c.arg(request)
         .stdin(Stdio::null())
@@ -101,7 +101,7 @@ fn launch_panel(request: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot launch panel: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "cannot open UI Notes plugin: {}",
+            "cannot open Omatate plugin: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -211,7 +211,7 @@ fn remember(session: &Path) {
         )
     })();
     if let Err(e) = result {
-        eprintln!("ui-notes: cannot remember project: {e}")
+        eprintln!("omatate: cannot remember project: {e}")
     }
 }
 fn restore_last_project() {
@@ -416,7 +416,7 @@ fn project_paths() -> Result<Vec<String>, String> {
         .collect::<Vec<_>>();
     match read_registry() {
         Ok(v) => candidates.extend(v),
-        Err(e) => eprintln!("ui-notes: cannot read project list: {e}"),
+        Err(e) => eprintln!("omatate: cannot read project list: {e}"),
     }
     let legacy = core::home().join("Documents/ui-notes");
     if let Ok(rd) = fs::read_dir(legacy) {
@@ -839,7 +839,7 @@ fn ptt_stop() -> Result<(), String> {
             })
         })?;
         let _ = panel_request("reload", Duration::from_secs(1));
-        return Err("ui-notes: voxtype record stop failed".into());
+        return Err("omatate: voxtype record stop failed".into());
     }
     core::with_lock(|| {
         core::update_entry(&session, id, |v| {
@@ -963,10 +963,13 @@ fn analyze(id: i64) -> Result<(), String> {
             "-c",
             &format!(
                 "model_reasoning_effort=\"{}\"",
-                env::var("UI_NOTES_REASONING").unwrap_or_else(|_| "low".into())
+                env::var("OMATATE_REASONING")
+                    .or_else(|_| env::var("UI_NOTES_REASONING"))
+                    .unwrap_or_else(|_| "low".into())
             ),
         ]);
-        let model = env::var("UI_NOTES_MODEL")
+        let model = env::var("OMATATE_MODEL")
+            .or_else(|_| env::var("UI_NOTES_MODEL"))
             .ok()
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "gpt-5.6-sol".into());
@@ -1126,7 +1129,7 @@ fn ingest(id: i64) -> Result<(), String> {
             .append(true)
             .open(relocated.join(format!(".data/logs/ingest-{id:03}.log")))
             .map_err(|e| e.to_string())?,
-        "ui-notes ingest: {branch} after {:.2}s",
+        "omatate ingest: {branch} after {:.2}s",
         start.elapsed().as_secs_f64()
     )
     .map_err(|e| e.to_string())?;
@@ -1172,7 +1175,7 @@ fn stop() -> Result<(), String> {
             && let Err(e) = core::render(s)
         {
             render_failed = true;
-            eprintln!("ui-notes: cannot render stopped session: {e}")
+            eprintln!("omatate: cannot render stopped session: {e}")
         }
         match fs::remove_file(core::runtime_dir().join("session")) {
             Ok(_) => {}
@@ -1347,7 +1350,7 @@ fn relocate_contents(source: &Path, destination: &Path) -> Result<bool, String> 
 }
 fn usage() {
     println!(
-        "usage: ui-notes <command> [args]\n\ncommands:\n  open                 choose a project, or reopen the active panel (default)\n  open-project <dir>   create or resume notes in a project directory\n  projects             list known project paths as JSON\n  create-project <parent> <name> <current>  internal: create and select a new folder\n  select-project <dir> <current>  internal: switch from the expected active project\n  start [name]         start a session (and open the panel)\n  resume <dir>         reopen an existing session and its draft\n  stop                 end the active session\n  toggle               open or close the panel; end the active session when closing\n  focus-toggle         enter or release panel keyboard focus\n  status               print the active session path, or inactive\n  section [title]      add a section to the active session\n  clip                 select and capture part of the screen\n  relocate <dir>       move the active session into <dir>\n  ai [on|off|toggle]   print or change the screenshot-analysis mode\n  ptt start|stop       push-to-talk press / release\n  render               regenerate notes.md\n  panel <cmd>          panel socket command"
+        "usage: omatate <command> [args]\n\ncommands:\n  open                 choose a project, or reopen the active panel (default)\n  open-project <dir>   create or resume notes in a project directory\n  projects             list known project paths as JSON\n  create-project <parent> <name> <current>  internal: create and select a new folder\n  select-project <dir> <current>  internal: switch from the expected active project\n  start [name]         start a session (and open the panel)\n  resume <dir>         reopen an existing session and its draft\n  stop                 end the active session\n  toggle               open or close the panel; end the active session when closing\n  focus-toggle         enter or release panel keyboard focus\n  status               print the active session path, or inactive\n  section [title]      add a section to the active session\n  clip                 select and capture part of the screen\n  relocate <dir>       move the active session into <dir>\n  ai [on|off|toggle]   print or change the screenshot-analysis mode\n  ptt start|stop       push-to-talk press / release\n  render               regenerate notes.md\n  panel <cmd>          panel socket command"
     )
 }
 
@@ -1579,8 +1582,8 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         _ => {
-            eprintln!("ui-notes: invalid command: {}", args.join(" "));
-            eprintln!("run 'ui-notes help'");
+            eprintln!("omatate: invalid command: {}", args.join(" "));
+            eprintln!("run 'omatate help'");
             process::exit(2)
         }
     }

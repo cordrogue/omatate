@@ -1,8 +1,9 @@
-# Publishing UI Notes
+# Publishing Omatate
 
-`cordrogue.ui-notes` is being prepared for the Omarchy plugin marketplace.
+`cordrogue.omatate` is published from https://github.com/cordrogue/omatate.
+The 0.3.0 release checks are recorded in [release-0.3.0.md](release-0.3.0.md).
 The project uses the MIT license, recorded in the root `LICENSE`,
-`manifest.json`, and `Cargo.toml`. It has not been submitted to the marketplace.
+`manifest.json`, and `Cargo.toml`. Marketplace listing requires maintainer approval.
 
 Before submitting:
 
@@ -29,7 +30,7 @@ Before submitting:
 The README documents the separate build step because Omarchy's plugin installer
 never runs plugin install hooks. The plugin runs as the logged-in user and starts
 its Rust backend inside the shared shell. The backend reads and writes selected
-project folders and UI Notes configuration/state. Optional screen capture uses
+project folders and Omatate configuration/state. Optional screen capture uses
 `grim` and `slurp`; optional dictation uses `voxtype`; AI analysis invokes `codex`
 and sends the screen image and window context to its configured service. There
 is no privileged installer or separate system service.
@@ -39,7 +40,7 @@ README, license, and safe install/removal behavior. Current registry policy
 requires an exact-commit scan and maintainer approval before a listing appears.
 Check the policy again at submission time.
 
-Publishing and submission rules checked September 8, 2026:
+Publishing and submission rules checked September 10, 2026:
 
 - [Marketplace publishing guide](https://plugins.omarchy.org/publish.html)
 - [Marketplace submission and review policy](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/README.md)

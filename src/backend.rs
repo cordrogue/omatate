@@ -1,11 +1,11 @@
 //! The Quickshell frontend uses one JSON request and response per line.
+use omatate::core;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use ui_notes::core;
 
 /// Polls compare a metadata stamp taken before the last full read, so a change
 /// racing that read still forces the next full snapshot. Projects stay watched
@@ -93,12 +93,19 @@ fn optional_text(path: &Path) -> Result<String, String> {
     }
 }
 
-fn snapshot(theme: &Value) -> Result<Value, String> {
+fn snapshot_entries(session: &Path, current: Option<Vec<Value>>) -> Result<Vec<Value>, String> {
+    match current {
+        Some(entries) => Ok(entries),
+        None => core::read_entries(session),
+    }
+}
+
+fn snapshot(theme: &Value, current_entries: Option<Vec<Value>>) -> Result<Value, String> {
     let session = core::session_path();
     let (identity, entries, draft) = match &session {
         Some(path) => (
             token(path)?,
-            core::read_entries(path)?,
+            snapshot_entries(path, current_entries)?,
             optional_text(&path.join(".data/draft.txt"))?,
         ),
         None => (String::new(), vec![], String::new()),
@@ -143,17 +150,22 @@ fn entry_id(request: &Value) -> Result<i64, String> {
         .ok_or_else(|| "missing positive integer entryId".into())
 }
 
-fn mutate(request: &Value, command: &str) -> Result<Option<String>, String> {
+#[derive(Default)]
+struct MutationResult {
+    warning: Option<String>,
+    entries: Option<Vec<Value>>,
+}
+
+fn mutate(request: &Value, command: &str) -> Result<MutationResult, String> {
     let session = expected_session(request)?;
     if command == "draft" {
         return core::atomic_write(
             &session.join(".data/draft.txt"),
             string(request, "text")?.as_bytes(),
         )
-        .map(|_| None);
+        .map(|_| MutationResult::default());
     }
-    let before = core::read_entries(&session)?;
-    let mut entries = before.clone();
+    let mut entries = core::read_entries(&session)?;
     match command {
         "note" => {
             let text = string(request, "text")?;
@@ -220,16 +232,20 @@ fn mutate(request: &Value, command: &str) -> Result<Option<String>, String> {
     if command == "note" {
         // Keep the draft when saving fails, and avoid duplicate notes on retry.
         if let Err(error) = core::atomic_write(&session.join(".data/draft.txt"), b"") {
-            core::write_entries(&session, &before)
+            entries.pop();
+            core::write_entries(&session, &entries)
                 .map_err(|rollback| format!("{error}; cannot roll back saved note: {rollback}"))?;
             return Err(error);
         }
     }
     // entries.jsonl is authoritative. A derived Markdown failure must not make a
     // successful note look unsaved and cause the frontend to insert it twice.
-    Ok(core::render_entries(&session, &entries)
-        .err()
-        .map(|error| format!("Entries saved but cannot render notes.md: {error}")))
+    Ok(MutationResult {
+        warning: core::render_entries(&session, &entries)
+            .err()
+            .map(|error| format!("Entries saved but cannot render notes.md: {error}")),
+        entries: Some(entries),
+    })
 }
 
 fn handle(
@@ -250,7 +266,7 @@ fn handle(
             {
                 return Ok(json!({"id":id,"ok":true,"unchanged":true}));
             }
-            let state = snapshot(theme)?;
+            let state = snapshot(theme, None)?;
             update_snapshot_cache(cache, &state, stamp);
             return Ok(json!({"id":id,"ok":true,"state":state}));
         }
@@ -260,10 +276,13 @@ fn handle(
         ) {
             return Err("unknown command".into());
         }
-        let mut warning = mutate(&request, command)?;
+        let MutationResult {
+            mut warning,
+            entries,
+        } = mutate(&request, command)?;
         let mut reply = json!({"id":id,"ok":true});
         let stamp = snapshot_stamp(theme, &cache.projects);
-        match snapshot(theme) {
+        match snapshot(theme, entries) {
             Ok(state) => {
                 update_snapshot_cache(cache, &state, stamp);
                 reply["state"] = state;
@@ -297,4 +316,30 @@ pub fn serve() -> Result<(), String> {
         output.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn snapshot_entries_reuses_successful_mutation_result() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let session = std::env::temp_dir().join(format!("ui-notes-backend-{nonce}"));
+        fs::create_dir_all(session.join(".data")).unwrap();
+        fs::write(session.join(".data/entries.jsonl"), "invalid JSON\n").unwrap();
+
+        let current = vec![json!({"id": 1, "transcript": "saved"})];
+        assert_eq!(
+            snapshot_entries(&session, Some(current.clone())).unwrap(),
+            current
+        );
+        assert!(snapshot_entries(&session, None).is_err());
+
+        fs::remove_dir_all(session).unwrap();
+    }
 }

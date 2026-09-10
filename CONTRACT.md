@@ -1,4 +1,4 @@
-# UI Notes component contract
+# Omatate component contract
 
 The Quickshell frontend is a keep-loaded Omarchy panel. Rust owns persistence,
 CLI operations, dictation, captures, and analysis. Dictation is delegated to the
@@ -10,15 +10,15 @@ storage format and existing `ui-notes` commands.
 
 ## Components
 
-- `manifest.json` declares `cordrogue.ui-notes`, kind `panel`, entry point
+- `manifest.json` declares `cordrogue.omatate`, kind `panel`, entry point
   `Plugin.qml`, and `keepLoaded: true`.
 - `Plugin.qml` and `qml/` run in the existing `omarchy-shell` process. They own
   windows, focus, editor state, search, shortcuts, and the panel socket.
-- `src/bin/ui-notes.rs` provides the CLI and invokes `src/backend.rs` for
-  `ui-notes backend`, a persistent stdin/stdout JSON process owned by QML.
+- `src/bin/omatate.rs` provides the CLI and invokes `src/backend.rs` for
+  `omatate backend`, a persistent stdin/stdout JSON process owned by QML.
 - `src/core.rs` holds shared paths, atomic persistence, locking, and Markdown
   rendering. `src/keyboard.rs` loads shortcut overrides.
-- `src/bin/ui-notes-panel.rs` summons this plugin through Omarchy shell IPC.
+- `src/bin/omatate-panel.rs` summons this plugin through Omarchy shell IPC.
   It does not start another Quickshell process.
 - `bin/ui-notes` and `bin/ui-notes-panel` are regular wrapper files that run the
   corresponding binary under `target/release/`. Plugin folders cannot contain
@@ -54,7 +54,7 @@ and session token for every editor mutation, so a delayed save cannot land in a
 different project. Project switching saves pending edits first and rejects an
 outgoing recording or transcription.
 
-The selected project must have a valid UI Notes session or be free of conflicting
+The selected project must have a valid Omatate session or be free of conflicting
 `notes.md` and `.data` content. Creation and switching preserve unrelated files.
 Existing GTK sessions use this same format and need no data migration.
 
@@ -75,11 +75,11 @@ Known projects live at `$XDG_STATE_HOME/ui-notes/projects.json`, defaulting to
 `~/.local/state/ui-notes/projects.json`. AI mode lives at
 `~/.config/ui-notes/ai`. Shortcut overrides use
 `$XDG_CONFIG_HOME/ui-notes/keys.toml`, defaulting to
-`~/.config/ui-notes/keys.toml`. Missing AI configuration means enabled.
+`~/.config/ui-notes/keys.toml`. Only an explicit `on` value enables AI. Missing, unreadable, or invalid configuration means disabled.
 
 ## Backend JSON protocol
 
-QML starts `ui-notes backend` with stdin enabled. Each request and reply occupies
+QML starts `omatate backend` with stdin enabled. Each request and reply occupies
 one JSON line. Requests carry an `id`, echoed in their reply. Success uses
 `ok: true`; failures use `ok: false` and `error`. A successful write may include a
 `warning` when entries saved but Markdown rendering or state refresh failed.
@@ -120,7 +120,7 @@ The public CLI uses this socket for its existing commands.
   The CLI also waits briefly for the compositor before running `grim`.
 - `show` restores the panel and previous focus intent after capture.
 - `toggle-focus` keeps the panel visible while transferring keyboard focus
-  between UI Notes and the previously focused Hyprland application.
+  between Omatate and the previously focused Hyprland application.
 - `reload` refreshes the backend snapshot; `restyle` remains a compatibility call.
 - `flush` saves pending drafts and edits.
 - `quit` saves before hiding. A failed save returns `ok: false` and leaves the
@@ -128,8 +128,8 @@ The public CLI uses this socket for its existing commands.
 - `open` focuses the project controls and refreshes state.
 
 Omarchy invokes the plugin's `open(payloadJson)` and `close()` lifecycle methods.
-`omarchy-shell shell summon cordrogue.ui-notes '{}'` opens it and
-`omarchy-shell shell hide cordrogue.ui-notes` hides it. `keepLoaded` leaves the
+`omarchy-shell shell summon cordrogue.omatate '{}'` opens it and
+`omarchy-shell shell hide cordrogue.omatate` hides it. `keepLoaded` leaves the
 backend loaded while the window is closed; the socket listens only while the
 plugin is open. Disable unloads the plugin.
 Install and uninstall ask the current panel to save before modifying loaded code.

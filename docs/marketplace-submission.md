@@ -1,16 +1,14 @@
 # Marketplace submission draft
 
-Title: `[Plugin]: UI Notes`
+Title: `[Plugin]: Omatate`
 
-This is a proposed issue body. Do not submit it until the owner confirms every
-checklist statement, confirms the repository is public, and approves this title
-and body. The checked boxes below are part of the proposed submission, pending
-that confirmation.
+Use this title and body for the initial marketplace submission. Before reuse,
+verify the repository visibility, ownership, dependencies, and checklist.
 
 ```markdown
 ### Repository URL
 
-https://github.com/cordrogue/ui-notes
+https://github.com/cordrogue/omatate
 
 ### Category
 
@@ -26,16 +24,17 @@ _No response_
 
 ### Maintainer notes
 
-UI Notes requires Rust 1.92+ and Cargo. Run ./install.sh to build after cloning
+Omatate requires Rust 1.92+ and Cargo. Run ./install.sh to build after cloning
 or using omarchy plugin add. Please apply the manual-setup label.
 
 The panel runs inside the shared Quickshell shell. Installation requires no
 privileges and does not overwrite user configuration. Optional screen capture
 uses grim and slurp; dictation uses voxtype.
 
-AI analysis is enabled by default. Push-to-talk while the new-note editor has
+AI analysis is disabled by default. Users explicitly enable it with
+omatate ai on. When enabled, push-to-talk while the new-note editor has
 focus invokes the authenticated codex CLI with a screenshot of the focused
-monitor and the project folder as its working directory. Run ui-notes ai off
+monitor and the project folder as its working directory. Run omatate ai off
 to disable AI analysis.
 
 ### Submission checklist
@@ -49,4 +48,4 @@ to disable AI analysis.
 
 The format follows the marketplace's
 [CLI and AI agent submission guide](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/SUBMISSION.md),
-checked September 8, 2026.
+checked September 10, 2026.

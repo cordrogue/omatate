@@ -32,7 +32,7 @@ pub(crate) fn config_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| ui_notes::core::home().join(".config"))
+        .unwrap_or_else(|| omatate::core::home().join(".config"))
         .join("ui-notes/keys.toml")
 }
 

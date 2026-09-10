@@ -1,0 +1,115 @@
+import QtQuick
+import QtTest
+import "../../qml" as UiNotes
+
+TestCase {
+    name: "UiNotesComponents"
+
+    QtObject {
+        id: testTheme
+        readonly property color accent: "#7aa2f7"
+        readonly property color foreground: "#c0caf5"
+        readonly property color muted: "#565f89"
+        readonly property color control: "#1f2335"
+        readonly property color hair: "#3b4261"
+        readonly property color selectionBg: "#33467c"
+        readonly property color selectionFg: "#ffffff"
+        readonly property color cursor: "#bb9af7"
+        readonly property string fontFamily: "Sans Serif"
+        readonly property real fontPointSize: 11
+        readonly property real smallPointSize: 9
+    }
+
+    Component {
+        id: buttonComponent
+        UiNotes.NoteButton {}
+    }
+
+    Component {
+        id: fieldComponent
+        UiNotes.NoteField {}
+    }
+
+    Component {
+        id: editorComponent
+        UiNotes.NoteEditor {}
+    }
+
+    Component {
+        id: iconComponent
+        UiNotes.NoteIcon {}
+    }
+
+    function test_button_state_and_sizing() {
+        const button = createTemporaryObject(buttonComponent, this, {
+            theme: testTheme,
+            text: "Save"
+        })
+        verify(button)
+        compare(button.textColor, testTheme.muted)
+        compare(button.focusPolicy, Qt.StrongFocus)
+        verify(button.implicitWidth >= 32)
+        verify(button.implicitHeight >= 24)
+
+        button.selected = true
+        compare(button.textColor, testTheme.accent)
+
+        button.iconName = "plus"
+        compare(button.implicitWidth, 32)
+        compare(button.implicitHeight, 24)
+    }
+
+    function test_field_applies_theme_and_geometry() {
+        const field = createTemporaryObject(fieldComponent, this, {
+            theme: testTheme,
+            text: "query"
+        })
+        verify(field)
+        compare(field.color, testTheme.foreground)
+        compare(field.selectionColor, testTheme.selectionBg)
+        compare(field.selectedTextColor, testTheme.selectionFg)
+        compare(field.placeholderTextColor, testTheme.muted)
+        compare(field.background.color, testTheme.control)
+        compare(field.background.border.color, testTheme.hair)
+        compare(field.leftPadding, 6)
+        compare(field.rightPadding, 6)
+        verify(field.implicitHeight >= 24)
+    }
+
+    function test_editor_section_mode() {
+        const editor = createTemporaryObject(editorComponent, this, {
+            theme: testTheme,
+            text: "A section"
+        })
+        verify(editor)
+        compare(editor.textFormat, TextEdit.PlainText)
+        compare(editor.wrapMode, TextEdit.Wrap)
+        compare(editor.verticalAlignment, TextEdit.AlignTop)
+        compare(editor.padding, 5)
+        compare(editor.background.border.color, "#00000000")
+
+        editor.bordered = true
+        compare(editor.background.border.color, testTheme.hair)
+
+        editor.section = true
+        compare(editor.wrapMode, TextEdit.NoWrap)
+        compare(editor.verticalAlignment, TextEdit.AlignVCenter)
+        compare(editor.padding, 3)
+        compare(editor.topPadding, 1)
+        verify(editor.implicitHeight >= 18)
+    }
+
+    function test_icon_catalog_and_defaults() {
+        const icon = createTemporaryObject(iconComponent, this, {
+            name: "search",
+            color: testTheme.accent
+        })
+        verify(icon)
+        compare(icon.implicitWidth, 14)
+        compare(icon.implicitHeight, 14)
+        compare(icon.color, testTheme.accent)
+        verify(icon.paths.search.length > 0)
+        verify(icon.paths.plus.length > 0)
+        compare(icon.paths.unknown, undefined)
+    }
+}

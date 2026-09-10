@@ -17,7 +17,7 @@ Item {
     property var manifest: null
     property var pluginRegistry: null
     property var barWidgetRegistry: null
-    property string executable: Quickshell.env("UI_NOTES_EXECUTABLE") || localPath(Qt.resolvedUrl("target/release/ui-notes"))
+    property string executable: Quickshell.env("OMATATE_EXECUTABLE") || Quickshell.env("UI_NOTES_EXECUTABLE") || localPath(Qt.resolvedUrl("target/release/omatate"))
     property bool shown: false
     property bool opened: false
     property bool minimized: false
@@ -33,7 +33,7 @@ Item {
     property string session: ""
     property string token: ""
     property string runtimeDir: ""
-    property bool ai: true
+    property bool ai: false
     property var projects: []
     property var entries: []
     property var dirtyEdits: ({})
@@ -268,8 +268,8 @@ Item {
     }
     function close() { saveAll(function(ok) { if (ok) { panelFocusGrab.active = false; opened = false; shown = false; previewAsset = ""; helping = false } }) }
     function stopSession() {
-        if (!session) { close(); if (shell && shell.hide) shell.hide("cordrogue.ui-notes"); return }
-        actionCommand(["stop"], function(ok) { if (ok) { panelFocusGrab.active = false; shown = false; if (shell && shell.hide) shell.hide("cordrogue.ui-notes") } })
+        if (!session) { close(); if (shell && shell.hide) shell.hide("cordrogue.omatate"); return }
+        actionCommand(["stop"], function(ok) { if (ok) { panelFocusGrab.active = false; shown = false; if (shell && shell.hide) shell.hide("cordrogue.omatate") } })
     }
     function chooseFolder(create) { if (busy) return; newFolder = create; folderDialog.title = create ? "Choose a parent for the new project" : "Choose a project folder"; folderDialog.open() }
     function selectProject(path) {
@@ -400,7 +400,7 @@ Item {
             // next event-loop turn so the client receives the acknowledgement.
             if (ok) Qt.callLater(function() {
                 opened = false
-                if (shell && shell.hide) shell.hide("cordrogue.ui-notes")
+                if (shell && shell.hide) shell.hide("cordrogue.omatate")
             })
         }); break
         default: reply({ok:false,error:"unknown command"})
@@ -426,7 +426,7 @@ Item {
                 } catch (e) { root.fail("Invalid backend response: " + e) }
             }
         }
-        stderr: SplitParser { onRead: data => console.warn("ui-notes:", data) }
+        stderr: SplitParser { onRead: data => console.warn("omatate:", data) }
         onExited: (code, status) => {
             root.ready = false
             root.fail("Notes backend stopped. Reopen the plugin to retry.")
@@ -469,9 +469,16 @@ Item {
     Timer { interval: 1500; running: root.ready && root.shown; repeat: true; onTriggered: if (!root.busy && !Object.keys(root.callbacks).length) root.request("snapshot", {poll:true}) }
     Timer { id: releaseTimer; interval: 180; onTriggered: root.focusAllowed = true }
     HyprlandFocusGrab { id: panelFocusGrab; windows: [panel] }
+    // Grab only long enough to enter the panel. OnDemand then lets the mouse
+    // transfer focus to another window while the notes stay visible.
+    Timer {
+        interval: 100
+        running: panelFocusGrab.active && panel.contentItem.Window.active
+        onTriggered: panelFocusGrab.active = false
+    }
     onScreensaverVisibleChanged: {
         if (screensaverVisible) {
-            restoreFocusAfterScreensaver = panelFocusGrab.active
+            restoreFocusAfterScreensaver = panel.contentItem.Window.active
             panelFocusGrab.active = false
         } else if (restoreFocusAfterScreensaver && shown && focusAllowed) {
             restoreFocusAfterScreensaver = false
@@ -497,6 +504,10 @@ Item {
     ListModel { id: entryModel }
     FolderDialog {
         id: folderDialog
+        // GTK's folder picker can abort the shell while enumerating network locations.
+        options: FolderDialog.DontUseNativeDialog
+        parentWindow: panel.contentItem.Window.window
+        popupType: QQC.Popup.Window
         onAccepted: {
             var folder = root.localPath(selectedFolder)
             if (root.newFolder) { root.parentFolder = folder; newProjectDialog.open() }
@@ -954,7 +965,7 @@ Item {
                     Text { text: "Projects"; Layout.fillWidth: true; Layout.topMargin: 7; color: root.theme.muted; font.family: root.theme.fontFamily; font.pointSize: root.theme.smallPointSize; font.bold: true }
                     Text { text: "Open Projects to switch among known folders, create a project, or use an existing folder. Pending edits save before switching."; Layout.fillWidth: true; wrapMode: Text.Wrap; color: root.theme.foreground; font.family: root.theme.fontFamily; font.pointSize: root.theme.fontPointSize }
                     Text { text: "Command line"; Layout.fillWidth: true; Layout.topMargin: 7; color: root.theme.muted; font.family: root.theme.fontFamily; font.pointSize: root.theme.smallPointSize; font.bold: true }
-                    Text { text: "Run ui-notes help for session, project, capture, AI, dictation, and panel commands."; Layout.fillWidth: true; wrapMode: Text.Wrap; color: root.theme.foreground; font.family: root.theme.fontFamily; font.pointSize: root.theme.fontPointSize }
+                    Text { text: "Run omatate help for session, project, capture, AI, dictation, and panel commands."; Layout.fillWidth: true; wrapMode: Text.Wrap; color: root.theme.foreground; font.family: root.theme.fontFamily; font.pointSize: root.theme.fontPointSize }
                     Text { visible: !!root.keysWarning; text: root.keysWarning; Layout.fillWidth: true; Layout.topMargin: 4; wrapMode: Text.Wrap; color: root.theme.red; font.family: root.theme.fontFamily; font.pointSize: root.theme.fontPointSize }
                 }
             }

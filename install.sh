@@ -1,17 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-plugin_id=cordrogue.ui-notes
+plugin_id=cordrogue.omatate
+legacy_id=cordrogue.ui-notes
+legacy_dir=$HOME/.config/omarchy/plugins/$legacy_id
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-plugin_dir=${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}
-install_dir=${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}
+plugin_dir=${OMATATE_PLUGIN_DIR:-${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}}
+install_dir=${OMATATE_INSTALL_DIR:-${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}}
 enable=true
 case "${1:-}" in
   --no-enable) enable=false ;;
   '') ;;
   *) echo "Usage: ./install.sh [--no-enable]" >&2; exit 1 ;;
 esac
-fail() { echo "ui-notes install: $*" >&2; exit 1; }
+fail() { echo "omatate install: $*" >&2; exit 1; }
 for program in cargo omarchy sha256sum jq; do
   command -v "$program" >/dev/null || fail "missing dependency: $program"
 done
@@ -23,22 +25,24 @@ install_dir=$(realpath -m -- "$install_dir")
 # Validate source before building or changing the installed copy.
 omarchy plugin validate "$project_dir"
 if [[ $project_dir != "$plugin_dir" && -e $plugin_dir ]]; then
-  [[ -f $plugin_dir/.ui-notes-install && $(cat "$plugin_dir/.ui-notes-install") == "$plugin_id" ]] \
+  [[ -f $plugin_dir/.omatate-install && $(cat "$plugin_dir/.omatate-install") == "$plugin_id" ]] \
     || fail "existing plugin directory is not managed by this installer: $plugin_dir"
 fi
-if [[ -f $plugin_dir/.ui-notes-install ]]; then
+if [[ -f $plugin_dir/.omatate-install ]]; then
   omarchy plugin validate "$plugin_dir"
-  [[ -f $plugin_dir/.ui-notes-files ]] || fail "missing installed file checksums"
-  (cd "$plugin_dir" && sha256sum --check --quiet .ui-notes-files) \
+  [[ -f $plugin_dir/.omatate-files ]] || fail "missing installed file checksums"
+  (cd "$plugin_dir" && sha256sum --check --quiet .omatate-files) \
     || fail "installed files were edited or removed; save those changes before reinstalling"
 fi
-for name in ui-notes ui-notes-panel; do
+for name in omatate omatate-panel ui-notes ui-notes-panel; do
   link=$install_dir/$name
   if [[ -e $link || -L $link ]]; then
     [[ -L $link ]] || fail "refusing to replace a file: $link"
     destination=$(readlink -- "$link")
     [[ $destination == "$project_dir/bin/$name" || $destination == "$plugin_dir/bin/$name" \
-      || $destination == "$project_dir/target/release/$name" ]] \
+      || $destination == "$project_dir/target/release/$name" \
+      || ( $name == ui-notes* && $destination == "$legacy_dir/bin/$name" \
+        && -f $legacy_dir/manifest.json && $(jq -r .id "$legacy_dir/manifest.json") == "$legacy_id" ) ]] \
       || fail "refusing to replace an unrelated link: $link"
   fi
 done
@@ -48,7 +52,8 @@ if $enable; then
   runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
   if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/ui-notes; else runtime_dir=$runtime_dir/ui-notes-$(id -u); fi
   if [[ -S $runtime_dir/panel.sock ]]; then
-    current_cli=$install_dir/ui-notes
+    current_cli=$install_dir/omatate
+    [[ -x $current_cli ]] || current_cli=$install_dir/ui-notes
     [[ -x $current_cli ]] || fail "panel is running but its installed CLI is unavailable"
     if flush_reply=$("$current_cli" panel quit 2>&1); then
       jq -e '.ok == true' <<< "$flush_reply" >/dev/null \
@@ -72,18 +77,18 @@ if [[ $project_dir != "$plugin_dir" ]]; then
   done
   [[ ! -f $project_dir/LICENSE ]] || cp -- "$project_dir/LICENSE" "$stage/LICENSE"
   mkdir -p "$stage/target/release"
-  cp -- "$project_dir/target/release/ui-notes" "$project_dir/target/release/ui-notes-panel" "$stage/target/release/"
+  cp -- "$project_dir/target/release/omatate" "$project_dir/target/release/omatate-panel" "$stage/target/release/"
   omarchy plugin validate "$stage"
-  (cd "$stage" && find . -type f ! -path './.ui-notes-files' -print0 | sort -z | xargs -0 sha256sum) \
-    > "$stage/.ui-notes-files"
+  (cd "$stage" && find . -type f ! -path './.omatate-files' -print0 | sort -z | xargs -0 sha256sum) \
+    > "$stage/.omatate-files"
   mkdir -p "$plugin_dir"
   declare -A staged_files=()
   while IFS= read -r record; do
     file=${record#*  }
     staged_files["$file"]=1
-  done < "$stage/.ui-notes-files"
+  done < "$stage/.omatate-files"
   # Remove files the previous release installed that this one no longer ships.
-  if [[ -f $plugin_dir/.ui-notes-files ]]; then
+  if [[ -f $plugin_dir/.omatate-files ]]; then
     while IFS= read -r record; do
       checksum=${record%% *}
       file=${record#*  }
@@ -103,18 +108,22 @@ if [[ $project_dir != "$plugin_dir" ]]; then
           echo "Preserved modified file: $installed_file"
         fi
       fi
-    done < "$plugin_dir/.ui-notes-files"
+    done < "$plugin_dir/.omatate-files"
   fi
   # Replace inodes: the keep-loaded backend may still execute the old binary.
   cp -R --remove-destination -- "$stage/." "$plugin_dir/"
-  printf '%s\n' "$plugin_id" > "$plugin_dir/.ui-notes-install"
+  printf '%s\n' "$plugin_id" > "$plugin_dir/.omatate-install"
 fi
 omarchy plugin validate "$plugin_dir"
 mkdir -p "$install_dir"
-for name in ui-notes ui-notes-panel; do
+for name in omatate omatate-panel ui-notes ui-notes-panel; do
   ln -sfn -- "$plugin_dir/bin/$name" "$install_dir/$name"
 done
 if $enable; then
+  if [[ -f $legacy_dir/manifest.json && $(jq -r .id "$legacy_dir/manifest.json") == "$legacy_id" ]]; then
+    omarchy plugin disable "$legacy_id"
+    echo "Disabled the previous UI Notes plugin. Its files remain at $legacy_dir."
+  fi
   omarchy-shell shell rescanPlugins >/dev/null
   discovered=false
   for ((attempt = 0; attempt < 30; attempt++)); do
@@ -130,4 +139,4 @@ if $enable; then
 else
   echo "Built and installed. Enable with: omarchy-shell shell rescanPlugins && omarchy plugin enable $plugin_id"
 fi
-echo "Installed UI Notes at $plugin_dir. Run: ui-notes open"
+echo "Installed Omatate at $plugin_dir. Run: omatate open"

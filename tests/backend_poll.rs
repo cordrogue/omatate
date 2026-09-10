@@ -40,7 +40,7 @@ fn backend_poll_detects_changes_and_caches_mutation_snapshots() {
         format!("{}\n", session.display()),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ui-notes"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omatate"))
         .arg("backend")
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", &runtime)

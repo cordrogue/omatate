@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-plugin_id=cordrogue.ui-notes
-plugin_dir=${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}
-install_dir=${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}
+plugin_id=cordrogue.omatate
+plugin_dir=${OMATATE_PLUGIN_DIR:-${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}}
+install_dir=${OMATATE_INSTALL_DIR:-${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}}
 disable=true
 case "${1:-}" in
   --no-disable) disable=false ;;
@@ -17,7 +17,7 @@ if $disable && [[ -d $plugin_dir ]]; then
   runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
   if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/ui-notes; else runtime_dir=$runtime_dir/ui-notes-$(id -u); fi
   if [[ -S $runtime_dir/panel.sock ]]; then
-    if flush_reply=$("$install_dir/ui-notes" panel quit 2>&1); then
+    if flush_reply=$("$install_dir/omatate" panel quit 2>&1); then
       jq -e '.ok == true' <<< "$flush_reply" >/dev/null || {
         echo "Panel could not save and close; removal stopped: $flush_reply" >&2
         exit 1
@@ -32,14 +32,14 @@ if $disable && [[ -d $plugin_dir ]]; then
   fi
   omarchy plugin disable "$plugin_id"
 fi
-for name in ui-notes ui-notes-panel; do
+for name in omatate omatate-panel ui-notes ui-notes-panel; do
   link=$install_dir/$name
   if [[ -L $link && $(readlink -- "$link") == "$plugin_dir/bin/$name" ]]; then
     rm -- "$link"
   fi
 done
-if [[ -f $plugin_dir/.ui-notes-install && $(cat "$plugin_dir/.ui-notes-install") == "$plugin_id" \
-  && -f $plugin_dir/.ui-notes-files ]]; then
+if [[ -f $plugin_dir/.omatate-install && $(cat "$plugin_dir/.omatate-install") == "$plugin_id" \
+  && -f $plugin_dir/.omatate-files ]]; then
   omarchy plugin validate "$plugin_dir"
   cd "$plugin_dir"
   while IFS= read -r record; do
@@ -58,8 +58,8 @@ if [[ -f $plugin_dir/.ui-notes-install && $(cat "$plugin_dir/.ui-notes-install")
     else
       echo "Preserved modified file: $plugin_dir/${file#./}"
     fi
-  done < .ui-notes-files
-  rm -- .ui-notes-files .ui-notes-install
+  done < .omatate-files
+  rm -- .omatate-files .omatate-install
   cd /
   rmdir -- "$plugin_dir" 2>/dev/null || true
 elif [[ -d $plugin_dir ]]; then

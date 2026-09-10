@@ -222,8 +222,8 @@ pub fn filename_timestamp() -> String {
 
 pub fn ai_enabled() -> bool {
     fs::read_to_string(home().join(".config/ui-notes/ai"))
-        .map(|s| s.trim() != "off")
-        .unwrap_or(true)
+        .map(|s| s.trim() == "on")
+        .unwrap_or(false)
 }
 
 pub fn home() -> PathBuf {
@@ -238,8 +238,16 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|v| v.to_str())
         .ok_or("invalid file name")?;
     let tmp = path.with_file_name(format!("{name}.tmp"));
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
     let result = (|| {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
         file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;

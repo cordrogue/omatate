@@ -7,7 +7,7 @@ fn main() {
         .args([
             "shell",
             "summon",
-            "cordrogue.ui-notes",
+            "cordrogue.omatate",
             &json!({"cmd": command}).to_string(),
         ])
         .output();
@@ -27,7 +27,7 @@ fn main() {
                 Err(error) => error.to_string(),
             };
             eprintln!(
-                "ui-notes-panel: cannot summon UI Notes: {detail}. Install and enable cordrogue.ui-notes in Omarchy Shell."
+                "omatate-panel: cannot summon Omatate: {detail}. Install and enable cordrogue.omatate in Omarchy Shell."
             );
             process::exit(1);
         }

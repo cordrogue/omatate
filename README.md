@@ -1,13 +1,17 @@
-# UI Notes
+# Omatate
+
+Universal annotation for Omarchy.
 
 A floating notes panel for Omarchy Quattro. You keep it open beside a mockup,
 type notes, group them into sections, and capture rectangles of the screen to
 annotate. Optional push-to-talk dictation turns speech into notes, and optional
 AI analysis attaches a description of what was on screen when you spoke.
 
+![Omatate showing project notes](preview.png)
+
 Quickshell draws the panel inside the running `omarchy-shell`. A Rust backend
 owns the command line, project storage, dictation, captures, and analysis. The
-plugin ID is `cordrogue.ui-notes`.
+plugin ID is `cordrogue.omatate`.
 The panel stays above regular and fullscreen applications. Omarchy's screensaver
 covers it; notes and editor state remain open behind the saver and return when
 it closes. The panel sits 4 pixels from the screen edge in fullscreen mode. With
@@ -25,19 +29,20 @@ shell you already have. There is no service, no privileged step, and no network
 code in this repository. The two optional features that reach outside the
 machine do so through tools you install and configure yourself.
 
-Screen capture. `ui-notes clip` runs `slurp` so you pick a rectangle, then
+Screen capture. `omatate clip` runs `slurp` so you pick a rectangle, then
 `grim` saves it into the project's `assets/` folder. Nothing captures without
 you drawing a rectangle.
 
 Dictation. Pressing the push-to-talk key runs `voxtype record start`, and
 releasing it runs `voxtype record stop`. Voxtype owns the microphone and the
 transcription. Whether audio stays local depends on how you configured
-Voxtype. UI Notes never opens the microphone itself and has no setting to
+Voxtype. Omatate never opens the microphone itself and has no setting to
 disable dictation. If you do not want dictation, do not add the push-to-talk
 binding.
 
-AI screen analysis. This is on by default and only fires when the panel's new
-note editor has focus and you press push-to-talk. UI Notes then screenshots the
+AI screen analysis. This is off by default. Enable it explicitly with
+`omatate ai on`. When enabled, it only fires when the panel's new
+note editor has focus and you press push-to-talk. Omatate then screenshots the
 entire focused monitor with `grim`, hides the panel first, and runs
 `codex exec` in read-only sandbox mode with the screenshot attached and the
 project folder as the working directory. Codex uses `gpt-5.6-sol` by default
@@ -49,23 +54,24 @@ is deleted about five minutes after capture. It never becomes a project asset.
 Turn this off with:
 
 ```sh
-ui-notes ai off
+omatate ai off
 ```
 
 That writes `off` to `~/.config/ui-notes/ai`. With AI off, push-to-talk still
-dictates, but no screenshot is taken and Codex is never run. `ui-notes ai`
+dictates, but no screenshot is taken and Codex is never run. `omatate ai`
 prints the current mode.
 
 Files created outside your project folders:
 
 | Path | Purpose |
 | --- | --- |
-| `~/.config/omarchy/plugins/cordrogue.ui-notes/` | The installed plugin |
-| `~/.local/bin/ui-notes`, `~/.local/bin/ui-notes-panel` | Links to the plugin's launchers |
+| `~/.config/omarchy/plugins/cordrogue.omatate/` | The installed plugin |
+| `~/.local/bin/omatate`, `~/.local/bin/omatate-panel` | Main commands |
+| `~/.local/bin/ui-notes`, `~/.local/bin/ui-notes-panel` | Compatibility links to the Omatate launchers |
 | `~/.local/state/ui-notes/projects.json` | Paths of projects you have opened |
 | `~/.config/ui-notes/ai` | AI mode, only after you change it |
 | `~/.config/ui-notes/keys.toml` | Shortcut overrides, only if you create it |
-| `~/Documents/ui-notes/` | Auto-named projects from `ui-notes start` |
+| `~/Documents/ui-notes/` | Auto-named projects from `omatate start` |
 | `$XDG_RUNTIME_DIR/ui-notes/` | Socket, lock, and temporary captures. Falls back to `/tmp/ui-notes-<uid>` |
 
 The installer does not edit Hyprland bindings, install packages, or create
@@ -89,20 +95,20 @@ projects list and shortcut file.
 Clone the repository and run its installer:
 
 ```sh
-git clone https://github.com/cordrogue/ui-notes.git
-cd ui-notes
+git clone https://github.com/cordrogue/omatate.git
+cd omatate
 ./install.sh
-ui-notes open
+omatate open
 ```
 
 The installer runs `omarchy plugin validate` on the source, builds both Rust
 executables with `cargo build --locked --release`, copies the plugin files
-including source and docs to the plugin directory, links the two launchers into
+including source and docs to the plugin directory, links the four launchers into
 `~/.local/bin`, rescans plugins, and enables the panel. Add `~/.local/bin` to
 your PATH if it is not there.
 
 It refuses to touch a plugin directory it did not create, and refuses to
-replace a launcher link that points somewhere other than a UI Notes checkout.
+replace a launcher link that points somewhere other than a Omatate checkout.
 On an update it checks the installed files against recorded checksums and
 stops if you edited any of them. If a panel is running it asks it to save and
 close before building. A failed build leaves the installed files as they were.
@@ -111,22 +117,36 @@ Re-run the installer from the checkout after pulling changes.
 Omarchy's git installer can also fetch the checkout, but it does not build:
 
 ```sh
-omarchy plugin add https://github.com/cordrogue/ui-notes.git --yes
-cd ~/.config/omarchy/plugins/cordrogue.ui-notes
+omarchy plugin add https://github.com/cordrogue/omatate.git --yes
+cd ~/.config/omarchy/plugins/cordrogue.omatate
 ./install.sh
 ```
 
-After `omarchy plugin update cordrogue.ui-notes`, run `./install.sh` in that
+After `omarchy plugin update cordrogue.omatate`, run `./install.sh` in that
 directory again.
 
 `./install.sh --no-enable` builds and copies without talking to the running
-shell. `UI_NOTES_PLUGIN_DIR` and `UI_NOTES_INSTALL_DIR` override the plugin and
+shell. `OMATATE_PLUGIN_DIR` and `OMATATE_INSTALL_DIR` override the plugin and
 launcher directories for staging.
+
+## Upgrading from UI Notes
+
+Omatate installs as `cordrogue.omatate` and disables `cordrogue.ui-notes`.
+The old plugin folder stays in place as a backup. Do not enable both plugins.
+The `ui-notes` and `ui-notes-panel` commands remain aliases, so existing
+Hyprland bindings and the `ui-notes` layer rule continue to work.
+
+Project formats, configuration, runtime files, and project history retain their
+existing `ui-notes` paths. No notes or folders need to move. An explicit saved
+AI setting remains in effect; a missing or invalid setting now means off.
+Legacy `UI_NOTES_MODEL`, `UI_NOTES_REASONING`, `UI_NOTES_EXECUTABLE`,
+`UI_NOTES_PLUGIN_DIR`, and `UI_NOTES_INSTALL_DIR` variables remain supported.
+The corresponding `OMATATE_` variables take precedence.
 
 ## Use
 
-`ui-notes open` restores the last project or shows the project selector.
-`ui-notes open-project /path/to/project` opens a folder from the command line.
+`omatate open` restores the last project or shows the project selector.
+`omatate open-project /path/to/project` opens a folder from the command line.
 The panel's project controls switch folders or create a project.
 
 Drafts save after a typing pause. Ctrl+Return or Ctrl+S saves a new note.
@@ -136,32 +156,33 @@ opens help with the current shortcuts.
 Ctrl+Shift+O cycles the panel, clip preview, and popup controls through 100%,
 80%, 60%, and 40% opacity. The setting lasts for the current plugin session.
 
-`ui-notes clip` opens the rectangle picker. Escape cancels. Clips are saved
+`omatate clip` opens the rectangle picker. Escape cancels. Clips are saved
 under the project's `assets/` folder and appear as relative image links in
-`notes.md`. `ui-notes stop` saves the draft and ends the session.
-`ui-notes help` lists every command.
+`notes.md`. `omatate stop` saves the draft and ends the session.
+`omatate help` lists every command.
 
 Add bindings like these to your Hyprland Lua configuration. Skip the two HOME
 lines if you do not want dictation.
 
 ```lua
 hl.layer_rule({ match = { namespace = "ui-notes" }, no_anim = true, animation = "none" })
-o.bind("SUPER + SHIFT + U", "UI notes session (toggle)", "ui-notes toggle")
-o.bind("SUPER + U", "UI notes keyboard focus", "ui-notes focus-toggle")
-o.bind("HOME", "Start dictation (push-to-talk)", "ui-notes ptt start")
-o.bind("HOME", "Stop dictation (push-to-talk)", "ui-notes ptt stop", { release = true })
+o.bind("SUPER + SHIFT + U", "Omatate session (toggle)", "omatate toggle")
+o.bind("SUPER + U", "Omatate keyboard focus", "omatate focus-toggle")
+o.bind("HOME", "Start dictation (push-to-talk)", "omatate ptt start")
+o.bind("HOME", "Stop dictation (push-to-talk)", "omatate ptt stop", { release = true })
 ```
 
-Super+U transfers keyboard focus between UI Notes and the previously focused
+Super+U transfers keyboard focus between Omatate and the previously focused
 Hyprland application without hiding the panel. Super+Shift+U still opens or
 ends the notes session.
+The mouse can also transfer focus to another window while the notes stay visible.
 
-With those bindings, HOME dictates into UI Notes when the new note editor has
+With those bindings, HOME dictates into Omatate when the new note editor has
 focus and behaves as plain Voxtype dictation everywhere else.
 
 ## Configuration
 
-`UI_NOTES_MODEL` and `UI_NOTES_REASONING` set the Codex model and reasoning
+`OMATATE_MODEL` and `OMATATE_REASONING` set the Codex model and reasoning
 effort for AI analysis. The model defaults to `gpt-5.6-sol`, and reasoning
 defaults to `low`.
 
@@ -182,12 +203,12 @@ refreshes when those source files change.
 ./uninstall.sh
 ```
 
-This asks a running panel to save, disables the plugin, removes the two
+This asks a running panel to save, disables the plugin, removes the four
 launcher links if they point at this plugin, and removes the installed files
 whose checksums still match what the installer wrote. Edited files, unrelated
 files, and the plugin directory itself when not empty are kept and reported.
 For a git-installed plugin the checkout stays; remove it with
-`omarchy plugin remove cordrogue.ui-notes`. `--no-disable` skips the shell
+`omarchy plugin remove cordrogue.omatate`. `--no-disable` skips the shell
 commands for a staging directory.
 
 The uninstaller never touches your notes or settings. To remove those too:
@@ -210,6 +231,7 @@ cargo build --locked --release
 omarchy plugin validate .
 /usr/lib/qt6/bin/qmllint -I /usr/share/omarchy/shell Plugin.qml qml/*.qml
 ./tests/run-qml-tests.sh
+python3 tests/check-install.py
 ```
 
 Rust tests run the built binary against a temporary HOME and stub out the
@@ -233,8 +255,8 @@ of symlinks. It does not run the QML or backend. Exercise the installed plugin
 with:
 
 ```sh
-omarchy-shell shell summon cordrogue.ui-notes '{}'
-omarchy-shell shell hide cordrogue.ui-notes
+omarchy-shell shell summon cordrogue.omatate '{}'
+omarchy-shell shell hide cordrogue.omatate
 omarchy plugin list --json
 qs log -p "$OMARCHY_PATH/shell" --tail 100
 ```
@@ -255,5 +277,5 @@ earlier GTK implementation and does not describe this version.
 
 ## License
 
-UI Notes is licensed under the [MIT License](LICENSE). The icons under
+Omatate is licensed under the [MIT License](LICENSE). The icons under
 `qml/icons/` are from Lucide and carry their own [ISC and MIT notices](qml/icons/LICENSE).

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Open the production picker in a disposable Wayland panel for about two seconds.
 
-Uses the existing compositor, with no Omatate backend or user project access.
+Uses the existing compositor, without accessing user projects.
 This checks dialog behavior and geometry; it does not simulate keyboard input.
 """
 

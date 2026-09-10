@@ -1,160 +1,91 @@
-# Omatate component contract
+# Omatate behavior
 
-The Quickshell frontend is a keep-loaded Omarchy panel. Rust owns persistence,
-CLI operations, dictation, captures, and analysis. Dictation is delegated to the
-`voxtype` command, captures to `grim` and `slurp`, and analysis to `codex exec`
-running in read-only sandbox mode with the screenshot attached and the project
-folder as its working directory. Those tools are the only paths by which data
-leaves the machine, and each is optional.
+## Project files
 
-## Components
+Each project owns `notes.md`, `.data/`, and optional `assets/`. A project may
+contain unrelated files, which Omatate preserves. Opening a folder refuses to
+overwrite an unrelated `notes.md` or invalid `.data/` directory.
 
-- `manifest.json` declares `cordrogue.omatate`, kind `panel`, entry point
-  `Plugin.qml`, and `keepLoaded: true`.
-- `Plugin.qml` and `qml/` run in the existing `omarchy-shell` process. They own
-  windows, focus, editor state, search, shortcuts, and the panel socket.
-- `src/bin/omatate.rs` provides the CLI and invokes `src/backend.rs` for
-  `omatate backend`, a persistent stdin/stdout JSON process owned by QML.
-- `src/core.rs` holds shared paths, atomic persistence, locking, and Markdown
-  rendering. `src/keyboard.rs` loads shortcut overrides.
-- `src/bin/omatate-panel.rs` summons this plugin through Omarchy shell IPC.
-  It does not start another Quickshell process.
-- `bin/omatate` and `bin/omatate-panel` are regular wrapper files that run the
-  corresponding binary under `target/release/`. Plugin folders cannot contain
-  symlinks. External CLI links in `~/.local/bin` point to these wrappers.
+`.data/entries.jsonl` is authoritative. Each line is a JSON object with a unique
+positive integer `id`. Notes have a local ISO timestamp `ts`, `transcript`, and
+`status`. Plain notes have `ai: false`. Sections have `kind: "section"` and
+`title`. Screen clips have a relative `asset` path and logical `asset_size`.
+AI notes may contain `context`, `context_status`, `shot`, `window`, and pending
+analysis job metadata. Context has `title`, `summary`, `regions`, and `notable`.
 
-The frontend normally resolves its backend relative to the plugin directory.
-`OMATATE_EXECUTABLE` can override that backend path for development.
+`.data/id` identifies the project independently of its path. `.data/draft.txt`
+stores the unfinished editor text. Transcripts, structured context, and logs
+live under their corresponding `.data/` subdirectories.
 
-## Project storage
+`notes.md` is generated from the records, ordered by entry ID. Deleting a
+section preserves its notes. Deleting a note preserves its captured asset.
 
-Each selected project contains:
+## Storage service
 
-| Path | Meaning |
-| --- | --- |
-| `notes.md` | Derived Markdown deliverable |
-| `.data/entries.jsonl` | Authoritative note and section records |
-| `.data/id` | Stable session identity, derived from PID and creation time |
-| `.data/draft.txt` | Unfinished new note, excluded from Markdown |
-| `.data/transcripts/`, `.data/context/`, `.data/logs/` | Worker output |
-| `assets/clip-<timestamp>.png` | Permanent rectangle captures |
+`qml/lib/Service.mjs` owns project state. `qml/OmatateService.qml` supplies the
+Quickshell environment and `qml/FileOps.qml` supplies asynchronous file and
+process operations. The UI calls the service directly.
 
-An entry has a positive integer `id`, timestamp, transcript, and status. AI
-entries can also carry a screen image path, window information, analysis status,
-and structured context. Plain entries use `ai: false`. A section has the same
-ID sequence with `kind: "section"` and a title. Section deletion preserves its
-notes. Clip assets use paths relative to the project, keeping folders portable.
+A lifetime file lock prevents another shell instance from writing concurrently.
+The service serializes mutations, project switches, and CLI commands. Every
+editor mutation checks its expected project path and identity token. External
+work returns to its original project and note, even if another project is
+active when it finishes. A replaced identity rejects stale results.
 
-Every writer of `entries.jsonl` holds the shared runtime flock, reads current
-records, updates the intended ID, and atomically replaces the file. Worker
-output files and external tool output are written outside that lock. Markdown renders from those
-records. Drafts save separately. The backend requires both expected project path
-and session token for every editor mutation, so a delayed save cannot land in a
-different project. Project switching saves pending edits first and rejects an
-outgoing recording or transcription.
+Files are replaced atomically. A note is persisted before its draft is cleared;
+a failed clear rolls back the insertion. A save receipt prevents duplicate draft
+recovery if the shell exits between those steps. A Markdown failure after saving records
+reports a warning without reporting the note as unsaved. The UI retains pending
+edits when a write fails. Project switches drain editor saves first.
 
-The selected project must have a valid Omatate session or be free of conflicting
-`notes.md` and `.data` content. Creation and switching preserve unrelated files.
-Existing GTK sessions use this same format and need no data migration.
+Filesystem arguments and user text are passed as separate process arguments or
+through stdin. They are never interpolated into shell command source. Paths for
+project operations must resolve to directories. Relocation rejects occupied
+destinations and preserves unrelated source files.
 
-## Runtime and user state
+## Commands and shell lifecycle
 
-Runtime files live under `$XDG_RUNTIME_DIR/omatate`, or `/tmp/omatate-$UID` when
-XDG runtime storage is unset. `session` holds the active absolute project path,
-`lock` coordinates writers, and `panel.sock` carries CLI requests to QML.
-Full-screen AI images live under `shots/`. A detached cleanup process deletes
-each one about five minutes after capture; the deletion is best effort and a
-failure before the analysis worker launches can leave a file for `start` to
-clear later. They do not become permanent project assets. The CLI's `start`
-command clears old runtime captures. `stop` never erases notes or clips in a
-project you chose; it does remove an auto-named project under
-`~/Documents/omatate` when that project has no records, draft, or assets.
+`bin/omatate` sends argument arrays through `omarchy-shell shell summon`.
+The launcher creates a private temporary reply directory under
+`$XDG_RUNTIME_DIR`; the service writes success or failure after the operation
+completes. The launcher prints the result, returns a failing status on errors,
+and removes the reply directory. Its only direct feature action is forwarding
+push-to-talk to Voxtype when there is no active Omatate session.
 
-Known projects live at `$XDG_STATE_HOME/omatate/projects.json`, defaulting to
-`~/.local/state/omatate/projects.json`. AI mode lives at
-`~/.config/omatate/ai`. Shortcut overrides use
-`$XDG_CONFIG_HOME/omatate/keys.toml`, defaulting to
-`~/.config/omatate/keys.toml`. Only an explicit `on` value enables AI. Missing, unreadable, or invalid configuration means disabled.
+The plugin stays loaded when hidden. The UI preserves the command socket at
+`$XDG_RUNTIME_DIR/omatate/panel.sock` for panel controls. Pending edits save
+before hiding, closing, or changing projects. Screen capture waits until panel,
+preview, and help windows are hidden.
 
-## Backend JSON protocol
+Project state lives on disk. The service restores the active project when the
+shell starts and the last known project when the user opens the panel. It
+recovers available transcripts and reconnects to pending analysis completion
+files. Unfinished work reports a visible failure instead of writing to a new
+project or silently deleting the note.
 
-QML starts `omatate backend` with stdin enabled. Each request and reply occupies
-one JSON line. Requests carry an `id`, echoed in their reply. Success uses
-`ok: true`; failures use `ok: false` and `error`. A successful write may include a
-`warning` when entries saved but Markdown rendering or state refresh failed.
-The frontend must not retry an already saved note solely because of that warning.
+## Optional work
 
-| Command | Request fields | Behavior |
-| --- | --- | --- |
-| `snapshot` | `id`, `cmd`, optional `poll` | Read current project, token, entries, draft, AI mode, known projects, shortcuts, runtime path, theme |
-| `draft` | `session`, `token`, `text` | Atomically persist the unfinished editor text |
-| `note` | `session`, `token`, `text` | Add a plain note and clear its draft |
-| `edit` | `session`, `token`, `entryId`, `text` | Change transcript or section title |
-| `delete-section` | `session`, `token`, `entryId` | Remove only the section heading |
-| `delete-note` | `session`, `token`, `entryId` | Remove a finished note while retaining its stored assets |
+Capture calls `slurp` and `grim`, with Escape treated as cancellation.
+Dictation calls Voxtype and checks its state and transcript output. Recording
+and transcription prevent project switching. The panel remains usable while
+waiting for transcription or analysis.
 
-Write requests also include `id` and `cmd`. A snapshot is returned as `state`
-when available. Empty notes, stale project identity, missing records, and edits
-to recording/transcribing notes fail without switching projects.
+AI runs only after explicit opt-in and a push-to-talk press while the new-note
+editor is focused. It captures the focused monitor and runs the authenticated
+Codex CLI with a schema, read-only sandbox, and project working directory.
+The external process has a timeout and survives shell reloads. QML handles
+completion and performs all note mutations. Relocation waits for outstanding
+analysis to finish. Temporary screenshots have detached cleanup jobs.
 
-With `poll: true`, a snapshot checks a metadata stamp against the last successful
-full snapshot, including snapshots attached to mutation replies. If unchanged,
-the reply contains `ok: true` and `unchanged: true` with no `state`; otherwise it
-returns a full snapshot. Snapshots without `poll: true` always return `state` on
-success.
+## Settings
 
-Operations already exposed by the CLI, such as select/create project, clips,
-sections, AI mode, and stopping, use argument arrays through Quickshell's Process
-API. User text and paths must not be interpolated into a shell command.
+AI is enabled only by the literal value `on` in `~/.config/omatate/ai`.
+Shortcut overrides use a `[keys]` table of string arrays in
+`$XDG_CONFIG_HOME/omatate/keys.toml`. Multiline arrays, comments, Qt shortcut
+spelling, and angle-bracket modifiers are supported. Unknown actions,
+conflicting shortcuts, unsupported syntax, and reserved typing/navigation keys
+fall back to default bindings with a warning.
 
-## Panel socket and shell lifecycle
-
-The panel socket accepts one JSON request per line and returns one JSON reply.
-The public CLI uses this socket for its existing commands.
-
-- `ping` reports readiness and the shared Quickshell process ID.
-- `focus` reports whether the panel holds keyboard focus and which editor is
-  active. AI dictation captures only when the new-note editor is active.
-- `hide` hides the panel and preview before acknowledging capture readiness.
-  The CLI also waits briefly for the compositor before running `grim`.
-- `show` restores the panel and previous focus intent after capture.
-- `toggle-focus` keeps the panel visible while transferring keyboard focus
-  between Omatate and the previously focused Hyprland application.
-- `reload` refreshes the backend snapshot; `restyle` remains a compatibility call.
-- `flush` saves pending drafts and edits.
-- `quit` saves before hiding. A failed save returns `ok: false` and leaves the
-  panel available. It never quits the shared Omarchy shell.
-- `open` focuses the project controls and refreshes state.
-
-Omarchy invokes the plugin's `open(payloadJson)` and `close()` lifecycle methods.
-`omarchy-shell shell summon cordrogue.omatate '{}'` opens it and
-`omarchy-shell shell hide cordrogue.omatate` hides it. `keepLoaded` leaves the
-backend loaded while the window is closed; the socket listens only while the
-plugin is open. Disable unloads the plugin.
-Install and uninstall ask the current panel to save before modifying loaded code.
-
-## Appearance and shortcuts
-
-The panel preserves the GTK layout and resolves the same colors and typography
-in Rust through `src/theme.rs`. Ghostty's effective configuration takes precedence,
-with the current Omarchy palette and font as fallbacks. The backend caches this
-result and refreshes it when a source file fingerprint changes. Snapshot `theme`
-contains Qt-compatible colors, font family, and point sizes. No GTK dependency or
-CSS provider is required. The installer adds no theme hooks.
-
-All panel windows use the overlay layer so they remain visible over ordinary
-fullscreen applications. While Omarchy's `org.omarchy.screensaver` window is
-present, they move to the top layer and release their keyboard focus grab. This
-places them behind the native fullscreen screensaver without closing the panel
-or discarding editor state; the overlay layer and prior focus intent return when
-the screensaver closes. On the panel's monitor, a fullscreen workspace ignores
-Omarchy's top and right bar reservations, using a 4 pixel top gap and 12 pixel right gap.
-Otherwise, a visible top or right bar adds its size to the matching gap.
-
-Shortcuts retain `share/keys.toml` compatibility. Rust translates GTK accelerator
-notation into Qt sequences for the frontend. Invalid override files fall back to
-defaults and expose a warning. The QML help panel shows effective shortcuts.
-`cycle_opacity` defaults to Ctrl+Shift+O and cycles all panel windows and popup
-controls through 100%, 80%, 60%, and 40% opacity without persisting the value.
-Theme and font updates use the original source files; runtime behavior should be
-verified on the supported Omarchy version before release.
+Theme resolution uses Ghostty's effective configuration, then Omarchy theme
+colors and font. Theme file changes trigger asynchronous refreshes. Slow tools
+have bounded execution time and do not block the UI thread.

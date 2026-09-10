@@ -1,5 +1,0 @@
-#!/bin/bash
-set -u
-
-# A theme slug or font name may be passed in $1 and is intentionally unused.
-omatate panel restyle >/dev/null 2>&1 || true

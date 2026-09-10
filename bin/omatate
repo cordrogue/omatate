@@ -1,4 +1,71 @@
-#!/bin/sh
-set -eu
-source_dir=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)
-exec "$source_dir/target/release/omatate" "$@"
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${1:-} == help || ${1:-} == -h || ${1:-} == --help ]]; then
+  cat <<'USAGE'
+Usage: omatate <command> [args]
+
+  open                            open the panel and restore the last project
+  open-project <directory>        start or resume notes in an existing folder
+  create-project <parent> <name> <current>
+  select-project <directory> <current>
+  projects                        list known project paths as JSON
+  start [name]                    create a project under ~/Documents/omatate
+  resume <directory>              open an existing notes project
+  stop                            save and end the session
+  toggle                          open or end the session
+  focus-toggle                    enter or release panel keyboard focus
+  status                          print the active project or inactive
+  section [title]                 add a section
+  clip                            select and capture a screen rectangle
+  relocate <directory>            move project files into an existing folder
+  ai [on|off|toggle]               print or change screen analysis mode
+  ptt start|stop                  push-to-talk press or release
+  render                          regenerate notes.md
+  panel <command>                 ping, focus, flush, hide, show, reload, quit, restyle
+USAGE
+  exit 0
+fi
+
+: "${XDG_RUNTIME_DIR:?Run Omatate inside your desktop session}"
+command -v jq >/dev/null || { echo 'omatate: jq is required' >&2; exit 1; }
+args=("$@")
+((${#args[@]})) || args=(open)
+case ${args[0]} in
+  open-project|resume|select-project|create-project|relocate)
+    ((${#args[@]} >= 2)) || { echo 'omatate: missing directory' >&2; exit 2; }
+    args[1]=$(realpath -m -- "${args[1]/#\~\//$HOME/}")
+    ;;
+esac
+
+# Voxtype still works outside Omatate, including when the plugin is disabled.
+# A running plugin decides whether the focused editor should receive dictation.
+if [[ ${args[0]} == ptt && ( ${args[1]:-} == start || ${args[1]:-} == stop ) && ! -s $XDG_RUNTIME_DIR/omatate/session ]]; then
+  exec voxtype record "${args[1]}"
+fi
+
+umask 077
+request_dir=$(mktemp -d "$XDG_RUNTIME_DIR/omatate-client.XXXXXXXXXX")
+trap 'rm -f -- "$request_dir/reply"; rmdir -- "$request_dir" 2>/dev/null || true' EXIT
+payload=$(jq -cn --arg reply "$request_dir/reply" --args '{args:$ARGS.positional,reply:$reply}' -- "${args[@]}")
+result=$(omarchy-shell shell summon cordrogue.omatate "$payload") || {
+  echo 'omatate: cannot reach Omarchy Shell. Enable cordrogue.omatate first.' >&2
+  exit 1
+}
+[[ $result == ok ]] || { printf 'omatate: cannot summon plugin: %s\n' "$result" >&2; exit 1; }
+# Completion comes from the service after its save/command queue has drained.
+for ((attempt=0; attempt<6500; attempt++)); do
+  if [[ -f $request_dir/reply ]]; then
+    if jq -e '.ok == true' "$request_dir/reply" >/dev/null; then
+      output=$(jq -r '.output // ""' "$request_dir/reply")
+      [[ -z $output ]] || printf '%s\n' "$output"
+      [[ ${args[0]} != status || $output != inactive ]]
+      exit $?
+    fi
+    jq -r '.error // "Command failed"' "$request_dir/reply" >&2
+    exit 1
+  fi
+  sleep 0.02
+done
+echo 'omatate: timed out waiting for the plugin' >&2
+exit 1

@@ -17,7 +17,6 @@ Item {
     property var manifest: null
     property var pluginRegistry: null
     property var barWidgetRegistry: null
-    property string executable: Quickshell.env("OMATATE_EXECUTABLE") || localPath(Qt.resolvedUrl("target/release/omatate"))
     property bool shown: false
     property bool opened: false
     property bool minimized: false
@@ -54,9 +53,6 @@ Item {
     property real previewY: 0
     property var hideReplies: []
     property int hideRetries: 0
-    property var commandQueue: []
-    property var commandDone: null
-    property string commandError: ""
     property bool newFolder: false
     property string parentFolder: ""
     property var keys: ({})
@@ -131,12 +127,19 @@ Item {
     function withAlpha(colorValue, opacity) { var c = Qt.tint("transparent", colorValue); return Qt.rgba(c.r, c.g, c.b, opacity) }
     function fail(message) { status = message; hasError = true }
     function request(cmd, data, done) {
-        if (!backend.running) { fail("Notes backend is unavailable. Reopen the plugin to retry."); if (done) done(false); return }
         var id = ++requestId
-        var message = Object.assign({id:id, cmd:cmd}, data || {})
         callbacks[id] = done || function() {}
-        backend.write(JSON.stringify(message) + "\n")
+        service.request(cmd, data).then(function(state) {
+            root.applyState(state)
+            var callback = root.callbacks[id]; delete root.callbacks[id]
+            if (callback) callback(true)
+        }, function(error) {
+            root.fail(error.message)
+            var callback = root.callbacks[id]; delete root.callbacks[id]
+            if (callback) callback(false)
+        })
     }
+
     function applyState(state) {
         var switched = session !== state.session || token !== state.token
         if (switched && (draftDirty || Object.keys(dirtyEdits).length)) {
@@ -194,7 +197,7 @@ Item {
         if (draftDirty) writes.push({cmd:"draft", text:draft.text})
         Object.keys(dirtyEdits).forEach(function(id) { writes.push({cmd:"edit", entryId:Number(id), text:dirtyEdits[id]}) })
         if (!writes.length) {
-            // The backend processes lines in order. This reply also waits for
+            // The service processes requests in order. This reply also waits for
             // writes already sent by an autosave or note submission.
             request("snapshot", {}, function(ok) {
                 if (ok && (draftDirty || Object.keys(dirtyEdits).length)) saveAll(done)
@@ -225,16 +228,7 @@ Item {
         })
     }
     function cli(args, done) {
-        commandQueue.push({args:args, done:done})
-        nextCommand()
-    }
-    function nextCommand() {
-        if (command.running || !commandQueue.length) return
-        var next = commandQueue.shift()
-        commandDone = next.done || null
-        commandError = ""
-        command.command = [executable].concat(next.args)
-        command.running = true
+        service.command(args).then(function() { if (done) done(true) }, function(error) { root.fail(error.message); if (done) done(false) })
     }
     function actionCommand(args, done) {
         if (busy) return
@@ -258,13 +252,53 @@ Item {
         })
     }
     function open(payloadJson) {
-        if (!backend.running) backend.running = true
         var payload = {}
-        try { payload = payloadJson ? JSON.parse(String(payloadJson)) : {} } catch (e) {}
-        if (payload.cmd && payload.cmd !== "open" && payload.cmd !== "ping") { handleCommand(payload.cmd, function() {}); return }
-        var wasShown = shown
-        request("snapshot", {}, function() { takeFocus(wasShown) })
-        takeFocus(wasShown)
+        try { payload = payloadJson ? JSON.parse(String(payloadJson)) : {} } catch (error) { fail("Invalid command payload"); return }
+        var args = payload.args || (payload.cmd && payload.cmd !== "open" ? ["panel", payload.cmd] : ["open"])
+        function reply(response) {
+            if (payload.reply) service.reply(payload.reply, response).catch(error => root.fail(error.message))
+            else if (!response.ok) root.fail(response.error)
+        }
+        service.start().then(function() {
+            root.saveAll(function(ok) {
+                if (!ok) { reply({ok:false,error:root.status}); return }
+                service.command(args).then(function(output) { reply({ok:true,output:output || ""}) },
+                    function(error) { reply({ok:false,error:error.message}) })
+            })
+        }, function(error) { reply({ok:false,error:error.message}) })
+    }
+    function noteFocused() { return shown && panel.contentItem.Window.active && draft.activeFocus }
+    // Called after pending editor writes have drained. Never request storage
+    // from these hooks: the service may already own the command queue.
+    function servicePanel(cmd) {
+        return new Promise(function(resolve, reject) {
+            switch (cmd) {
+            case "open": root.takeFocus(false); resolve({ok:true}); break
+            case "ping": resolve({ok:root.opened,pid:Quickshell.processId}); break
+            case "focus": resolve({ok:true,active:root.shown && panel.contentItem.Window.active,focus:root.noteFocused() ? "note" : "none"}); break
+            case "flush": case "reload": resolve({ok:true}); break
+            case "restyle": appearance.refresh(); resolve({ok:true}); break
+            case "hide":
+                root.hiddenFocus = panel.contentItem.Window.active; root.shown = false; panelFocusGrab.active = false
+                root.previewAsset = ""; root.helping = false
+                root.hideReplies.push(function(reply) { if (reply.ok) resolve(reply); else reject(new Error(reply.error)) })
+                root.hideRetries = 0; hideTimer.restart(); break
+            case "show":
+                root.focusAllowed = root.hiddenFocus; root.shown = true
+                if (root.hiddenFocus) Qt.callLater(function() { if (root.shown && root.focusAllowed && !root.screensaverVisible) panelFocusGrab.active = true })
+                else releaseTimer.restart()
+                resolve({ok:true}); break
+            case "toggle-focus":
+                if (panel.contentItem.Window.active && root.shown) { root.focusAllowed = false; panelFocusGrab.active = false; root.helping = false; root.previewAsset = ""; releaseTimer.restart() }
+                else root.takeFocus(false)
+                resolve({ok:true}); break
+            case "quit":
+                panelFocusGrab.active = false; root.opened = false; root.shown = false; root.previewAsset = ""; root.helping = false
+                if (root.shell && root.shell.hide) root.shell.hide("cordrogue.omatate")
+                resolve({ok:true}); break
+            default: reject(new Error("Unknown panel command: " + cmd))
+            }
+        })
     }
     function close() { saveAll(function(ok) { if (ok) { panelFocusGrab.active = false; opened = false; shown = false; previewAsset = ""; helping = false } }) }
     function stopSession() {
@@ -407,51 +441,13 @@ Item {
         }
     }
 
-    Process {
-        id: backend
-        command: [root.executable, "backend"]
-        stdinEnabled: true
-        running: true
-        onStarted: root.request("snapshot", {}, function(ok) { if (ok) { root.hasError = false } })
-        stdout: SplitParser {
-            onRead: data => {
-                try {
-                    var response = JSON.parse(data)
-                    if (response.ok && response.state) root.applyState(response.state)
-                    if (!response.ok) root.fail(response.error || "Could not save notes")
-                    var callback = root.callbacks[response.id]
-                    delete root.callbacks[response.id]
-                    if (callback) callback(response.ok)
-                    if (response.warning) root.fail(response.warning)
-                } catch (e) { root.fail("Invalid backend response: " + e) }
-            }
-        }
-        stderr: SplitParser { onRead: data => console.warn("omatate:", data) }
-        onExited: (code, status) => {
-            root.ready = false
-            root.fail("Notes backend stopped. Reopen the plugin to retry.")
-            var pending = root.callbacks; root.callbacks = ({})
-            Object.keys(pending).forEach(function(id) { pending[id](false) })
-        }
+    OmatateService {
+        id: service
+        panel: root
+        onChanged: state => root.applyState(state)
+        onWarning: message => root.fail(message)
     }
-    Process {
-        id: command
-        stdout: SplitParser { onRead: data => {} }
-        stderr: SplitParser { onRead: data => { root.commandError += data + "\n" } }
-        onExited: (code, status) => {
-            var done = root.commandDone; root.commandDone = null
-            if (code !== 0) root.fail(root.commandError.trim() || "Command failed")
-            if (done) done(code === 0)
-            Qt.callLater(root.nextCommand)
-        }
-        onRunningChanged: {
-            if (running || !root.commandDone) return
-            var done = root.commandDone; root.commandDone = null
-            root.fail(root.commandError.trim() || "Command failed to start")
-            done(false)
-            Qt.callLater(root.nextCommand)
-        }
-    }
+    OmatateTheme { id: appearance; onValueChanged: root.theme = value }
     SocketServer {
         active: root.ready && root.opened && root.runtimeDir.length > 0
         path: root.runtimeDir + "/panel.sock"
@@ -466,7 +462,7 @@ Item {
         }
     }
     Timer { id: autosave; interval: 450; onTriggered: root.saveAll() }
-    Timer { interval: 1500; running: root.ready && root.shown; repeat: true; onTriggered: if (!root.busy && !Object.keys(root.callbacks).length) root.request("snapshot", {poll:true}) }
+
     Timer { id: releaseTimer; interval: 180; onTriggered: root.focusAllowed = true }
     HyprlandFocusGrab { id: panelFocusGrab; windows: [panel] }
     // Grab only long enough to enter the panel. OnDemand then lets the mouse
@@ -748,6 +744,7 @@ Item {
                 QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOff
                 NoteEditor {
                     id: draft
+                    objectName: "omatate-draft"
                     theme: root.theme
                     bordered: true
                     width: draftScroll.availableWidth

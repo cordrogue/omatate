@@ -3,9 +3,8 @@
 # Remove actions you do not want to override. Use [] to disable an action.
 # Duplicate bindings are rejected. Escape and Tab are reserved, as are bare printable
 # keys and printable keys modified only by Shift.
-# The Quickshell panel reloads these overrides with its next backend snapshot.
-# Qt sequences such as Ctrl+S and legacy GTK accelerator notation below are accepted.
-# Rust translates the legacy notation to Qt shortcuts.
+# The panel watches this file and reloads shortcut overrides when it changes.
+# Qt sequences such as Ctrl+S and the angle-bracket notation below are accepted.
 
 [keys]
 save_note = ['<Control>Return', '<Control>s']

@@ -2,11 +2,15 @@
   "schemaVersion": 1,
   "id": "cordrogue.omatate",
   "name": "Omatate",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "cordrogue",
   "license": "MIT",
   "description": "Annotate anything on your screen with project notes, captures, and optional voice dictation.",
-  "kinds": ["panel"],
-  "entryPoints": { "panel": "Plugin.qml" },
+  "kinds": [
+    "panel"
+  ],
+  "entryPoints": {
+    "panel": "Plugin.qml"
+  },
   "keepLoaded": true
 }

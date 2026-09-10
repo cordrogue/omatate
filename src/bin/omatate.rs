@@ -170,7 +170,7 @@ fn registry() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| core::home().join(".local/state"))
-        .join("ui-notes/projects.json")
+        .join("omatate/projects.json")
 }
 fn read_registry() -> Result<Vec<String>, String> {
     let p = registry();
@@ -418,7 +418,7 @@ fn project_paths() -> Result<Vec<String>, String> {
         Ok(v) => candidates.extend(v),
         Err(e) => eprintln!("omatate: cannot read project list: {e}"),
     }
-    let legacy = core::home().join("Documents/ui-notes");
+    let legacy = core::home().join("Documents/omatate");
     if let Ok(rd) = fs::read_dir(legacy) {
         let mut v = rd
             .filter_map(Result::ok)
@@ -485,7 +485,7 @@ fn start(name: Option<&str>) -> Result<PathBuf, String> {
             return Ok(s);
         }
         remove_tree_contents(&core::runtime_dir().join("shots"))?;
-        let root = core::home().join("Documents/ui-notes");
+        let root = core::home().join("Documents/omatate");
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let stamp = core::filename_timestamp();
         let suffix = match name {
@@ -675,9 +675,9 @@ fn spawn_worker(action: &str, id: i64, session: &Path) -> Result<(), String> {
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
     let mut c = Command::new(exe);
     c.args([action, &id.to_string()])
-        .env("UI_NOTES_SESSION_PATH", session)
+        .env("OMATATE_SESSION_PATH", session)
         .env(
-            "UI_NOTES_SESSION_ID",
+            "OMATATE_SESSION_ID",
             fs::read_to_string(session.join(".data/id"))
                 .unwrap_or_default()
                 .trim(),
@@ -963,13 +963,10 @@ fn analyze(id: i64) -> Result<(), String> {
             "-c",
             &format!(
                 "model_reasoning_effort=\"{}\"",
-                env::var("OMATATE_REASONING")
-                    .or_else(|_| env::var("UI_NOTES_REASONING"))
-                    .unwrap_or_else(|_| "low".into())
+                env::var("OMATATE_REASONING").unwrap_or_else(|_| "low".into())
             ),
         ]);
         let model = env::var("OMATATE_MODEL")
-            .or_else(|_| env::var("UI_NOTES_MODEL"))
             .ok()
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "gpt-5.6-sol".into());
@@ -1186,7 +1183,7 @@ fn stop() -> Result<(), String> {
         if render_failed {
             return Ok(());
         }
-        let root = core::home().join("Documents/ui-notes");
+        let root = core::home().join("Documents/omatate");
         let named = s.parent() == Some(root.as_path())
             && s.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                 n.len() >= 15
@@ -1458,7 +1455,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 .get(1)
                 .is_none_or(|v| matches!(v.as_str(), "on" | "off" | "toggle")) =>
         {
-            let path = core::home().join(".config/ui-notes/ai");
+            let path = core::home().join(".config/omatate/ai");
             let mut state = if core::ai_enabled() { "on" } else { "off" };
             if let Some(a) = args.get(1) {
                 state = match a.as_str() {

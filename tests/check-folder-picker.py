@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Open the production picker in a disposable Wayland panel for about two seconds.
 
-Uses the existing compositor, with no UI Notes backend or user project access.
+Uses the existing compositor, with no Omatate backend or user project access.
 This checks dialog behavior and geometry; it does not simulate keyboard input.
 """
 
@@ -43,7 +43,7 @@ ShellRoot {
         implicitHeight: 120
         anchors { top: true; right: true }
         exclusionMode: ExclusionMode.Ignore
-        WlrLayershell.namespace: "ui-notes-picker-test"
+        WlrLayershell.namespace: "omatate-picker-test"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
         Rectangle { anchors.fill: parent; color: "#333333" }
@@ -94,7 +94,7 @@ if not display:
     raise SystemExit("A running Wayland session is required.")
 if not os.path.isabs(display):
     display = str(Path(env["XDG_RUNTIME_DIR"]) / display)
-with tempfile.TemporaryDirectory(prefix="ui-notes-picker-test-") as temporary:
+with tempfile.TemporaryDirectory(prefix="omatate-picker-test-") as temporary:
     directory = Path(temporary)
     runtime = directory / "runtime"
     runtime.mkdir(mode=0o700)

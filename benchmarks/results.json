@@ -64,7 +64,7 @@
     }
   },
   "baseline_sha256": {
-    "ui-notes": "f33be311c6432f592d25a0cec4507d5ccb9785a8f55c68c85313b8b69a927215",
-    "ui-notes-panel": "1b41ceb627d64ce4949d8eba7828cddb1f2448641537f459254108f6710beadb"
+    "omatate": "f33be311c6432f592d25a0cec4507d5ccb9785a8f55c68c85313b8b69a927215",
+    "omatate-panel": "1b41ceb627d64ce4949d8eba7828cddb1f2448641537f459254108f6710beadb"
   }
 }

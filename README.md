@@ -1,33 +1,197 @@
 # Omatate
 
-Universal annotation for Omarchy.
-
-A floating notes panel for Omarchy Quattro. You keep it open beside a mockup,
-type notes, group them into sections, and capture rectangles of the screen to
-annotate. Optional push-to-talk dictation turns speech into notes, and optional
-AI analysis attaches a description of what was on screen when you spoke.
+Annotate anything on your screen with a floating notes panel for Omarchy Quattro.
+Keep notes beside a mockup, website, or application, group them into sections,
+and capture screen regions to reference later.
 
 ![Omatate showing project notes](preview.png)
 
+- Write and search project notes without switching away from your work.
+- Capture a rectangle of the screen and attach it to a note.
+- Dictate with an optional push-to-talk binding.
+- Add AI descriptions of the screen when you dictate, off by default.
+
+Every project is a folder you choose. Omatate writes `notes.md` there, keeps
+its authoritative records under `.data/`, and saves clips under `assets/`.
+You can read and share the Markdown and images without Omatate.
+
+[Install](#install) · [Use](#use) · [Update](#update) ·
+[Privacy and files](#privacy-and-files) · [Remove](#remove)
+
+## Install
+
+You need Omarchy Quattro with its Quickshell shell running, Git, Rust 1.92 or
+newer with Cargo, and a C linker. The installer also uses Bash, coreutils,
+findutils, `jq`, `omarchy`, and `omarchy-shell`.
+
+If you do not already have a Rust toolchain and build tools:
+
+```sh
+omarchy pkg add rust base-devel
+```
+
+Clone and build Omatate, then open the panel:
+
+```sh
+git clone https://github.com/cordrogue/omatate.git
+cd omatate
+./install.sh
+omatate open
+```
+
+The installer builds the Rust backend with `cargo build --locked --release`,
+installs the plugin as `cordrogue.omatate`, links its commands into
+`~/.local/bin`, and enables it. Cargo may download build dependencies.
+Keep the checkout for updates, and make sure `~/.local/bin` is on your PATH.
+The installer itself does not install packages, edit keybindings, or create a
+system service.
+
+Typing notes works without dictation or AI. For screen clips, install
+`grim` and `slurp` if they are missing:
+
+```sh
+omarchy pkg add grim slurp
+```
+
+For dictation, configure Voxtype for your microphone and add the
+[push-to-talk bindings](#use). The `voxtype-bin` package provides the
+`voxtype` command. AI descriptions additionally require an authenticated
+`codex` CLI. Read [Privacy and files](#privacy-and-files) before enabling them.
+
+### Using Omarchy's plugin manager
+
+Omarchy's `plugin add` command clones and validates a plugin; it does not run
+`install.sh` or compile Rust. Omatate therefore needs a build step even when
+installed from the marketplace.
+
+As an alternative to the checkout above, run:
+
+```sh
+omarchy plugin add https://github.com/cordrogue/omatate.git
+```
+
+Accept the clone prompt and choose **No** when asked to enable the plugin.
+Then build it in the installed checkout:
+
+```sh
+cd ~/.config/omarchy/plugins/cordrogue.omatate
+./install.sh
+omatate open
+```
+
+`install.sh` enables the plugin after the build succeeds. Using `plugin add`
+with `--enable` alone leaves the backend and command launchers missing.
+If you already added the plugin, skip `plugin add` and run the build steps
+above. Choose one installation method; a separate checkout cannot overwrite
+an existing installation owned by the plugin manager.
+
+### Installer behavior
+
+The installer validates the source, builds both Rust executables, and installs
+source and docs alongside the binaries. When run in the plugin manager's
+checkout, it builds in place.
+
+It refuses to touch a plugin directory it did not create, and refuses to
+replace a launcher link that points somewhere other than an Omatate checkout.
+On an update to a copied installation, it checks the installed files against
+recorded checksums and stops if you edited any of them. If a panel is running,
+it asks it to save and close before building. A failed build does not replace
+the installed binaries.
+
+`./install.sh --no-enable` builds and installs without talking to the running
+shell. `OMATATE_PLUGIN_DIR` and `OMATATE_INSTALL_DIR` override the plugin and
+launcher directories for staging.
+
+## Use
+
+`omatate open` restores the last project or shows the project selector.
+`omatate open-project /path/to/project` opens a folder from the command line.
+The panel's project controls switch folders or create a project.
+
+Drafts save after a typing pause. Ctrl+Return or Ctrl+S saves a new note.
+Existing notes save as you edit them. Search filters note text, descriptions,
+and section titles. Ctrl+Delete removes the focused saved note. Ctrl+H or F1
+opens help with the current shortcuts.
+Ctrl+Shift+O cycles the panel, clip preview, and popup controls through 100%,
+80%, 60%, and 40% opacity. The setting lasts for the current plugin session.
+
+`omatate clip` opens the rectangle picker. Escape cancels. Clips are saved
+under the project's `assets/` folder and appear as relative image links in
+`notes.md`. `omatate stop` saves the draft and ends the session.
+`omatate help` lists every command.
+
+Add bindings like these to your Hyprland Lua configuration. Skip the two HOME
+lines if you do not want dictation.
+
+```lua
+hl.layer_rule({ match = { namespace = "omatate" }, no_anim = true, animation = "none" })
+o.bind("SUPER + SHIFT + U", "Omatate session (toggle)", "omatate toggle")
+o.bind("SUPER + U", "Omatate keyboard focus", "omatate focus-toggle")
+o.bind("HOME", "Start dictation (push-to-talk)", "omatate ptt start")
+o.bind("HOME", "Stop dictation (push-to-talk)", "omatate ptt stop", { release = true })
+```
+
+Super+U transfers keyboard focus between Omatate and the previously focused
+Hyprland application without hiding the panel. Super+Shift+U still opens or
+ends the notes session.
+The mouse can also transfer focus to another window while the notes stay visible.
+
+With those bindings, HOME dictates into Omatate when the new note editor has
+focus and behaves as plain Voxtype dictation everywhere else.
+
+## Update
+
+For the recommended installation, run these commands from your original
+`omatate` checkout:
+
+```sh
+git pull --ff-only && ./install.sh
+```
+
+For an installation made with `omarchy plugin add`, run:
+
+```sh
+omarchy plugin update cordrogue.omatate &&
+  "$HOME/.config/omarchy/plugins/cordrogue.omatate/install.sh"
+```
+
+Both methods need `install.sh` to rebuild the backend and refresh launchers.
+`omarchy plugin update` only updates git-managed installations; it cannot
+update the copy created by the recommended installer.
+
+After a successful build, reopen with `omatate open`. Current Quattro builds
+reload local plugin code when it changes. If the panel still shows the old
+version, save and close it with `omatate stop`, run `omarchy restart shell`,
+then run `omatate open` again. Restarting the shell also reloads the bar and
+other plugins.
+
+## Configuration
+
+`OMATATE_MODEL` and `OMATATE_REASONING` set the Codex model and reasoning
+effort for AI analysis. The model defaults to `gpt-5.6-sol`, and reasoning
+defaults to `low`.
+
+Shortcut defaults are in [share/keys.toml](share/keys.toml). Copy it to
+`$XDG_CONFIG_HOME/omatate/keys.toml`, or `~/.config/omatate/keys.toml` when
+that variable is unset, and keep only the actions you want to change.
+Press Alt+Shift+Enter to expand or collapse the focused saved note. Customize
+this shortcut with `expand_note`; it also appears in the help menu.
+Customize the opacity shortcut with `cycle_opacity`.
+
+Colors and font come from Ghostty's effective configuration when Ghostty is
+installed, with the current Omarchy theme and font as fallbacks. The panel
+refreshes when those source files change.
+
+The panel stays above regular and fullscreen applications. Omarchy's
+screensaver covers it, and notes and editor state return when it closes.
+The panel adjusts its position for a top or right Omarchy bar.
+
+## Privacy and files
+
 Quickshell draws the panel inside the running `omarchy-shell`. A Rust backend
-owns the command line, project storage, dictation, captures, and analysis. The
-plugin ID is `cordrogue.omatate`.
-The panel stays above regular and fullscreen applications. Omarchy's screensaver
-covers it; notes and editor state remain open behind the saver and return when
-it closes. The panel sits 4 pixels from the screen edge in fullscreen mode. With
-the Omarchy bar visible, it sits 4 pixels below a top bar or 12 pixels left of a
-right bar.
-
-Every project is a folder you choose. Notes land in `notes.md` in that folder,
-with the authoritative records under `.data/` and captures under `assets/`.
-Nothing is stored in a database or a hidden cache.
-
-## What it does on your machine
-
-Read this section before installing. Everything runs as your user inside the
-shell you already have. There is no service, no privileged step, and no network
-code in this repository. The two optional features that reach outside the
-machine do so through tools you install and configure yourself.
+handles project storage, dictation, captures, and analysis. Both run as your
+user. Omatate has no separate system service or direct network client;
+optional dictation and AI use tools you install and configure yourself.
 
 Screen capture. `omatate clip` runs `slurp` so you pick a rectangle, then
 `grim` saves it into the project's `assets/` folder. Nothing captures without
@@ -57,7 +221,7 @@ Turn this off with:
 omatate ai off
 ```
 
-That writes `off` to `~/.config/ui-notes/ai`. With AI off, push-to-talk still
+That writes `off` to `~/.config/omatate/ai`. With AI off, push-to-talk still
 dictates, but no screenshot is taken and Codex is never run. `omatate ai`
 prints the current mode.
 
@@ -67,161 +231,48 @@ Files created outside your project folders:
 | --- | --- |
 | `~/.config/omarchy/plugins/cordrogue.omatate/` | The installed plugin |
 | `~/.local/bin/omatate`, `~/.local/bin/omatate-panel` | Main commands |
-| `~/.local/bin/ui-notes`, `~/.local/bin/ui-notes-panel` | Compatibility links to the Omatate launchers |
-| `~/.local/state/ui-notes/projects.json` | Paths of projects you have opened |
-| `~/.config/ui-notes/ai` | AI mode, only after you change it |
-| `~/.config/ui-notes/keys.toml` | Shortcut overrides, only if you create it |
-| `~/Documents/ui-notes/` | Auto-named projects from `omatate start` |
-| `$XDG_RUNTIME_DIR/ui-notes/` | Socket, lock, and temporary captures. Falls back to `/tmp/ui-notes-<uid>` |
+| `~/.local/state/omatate/projects.json` | Paths of projects you have opened |
+| `~/.config/omatate/ai` | AI mode, only after you change it |
+| `~/.config/omatate/keys.toml` | Shortcut overrides, only if you create it |
+| `~/Documents/omatate/` | Auto-named projects from `omatate start` |
+| `$XDG_RUNTIME_DIR/omatate/` | Socket, lock, and temporary captures. Falls back to `/tmp/omatate-<uid>` |
 
 The installer does not edit Hyprland bindings, install packages, or create
 services. `$XDG_STATE_HOME` and `$XDG_CONFIG_HOME` are honored for the
 projects list and shortcut file.
 
-## Requirements
-
-- Omarchy Quattro with its Quickshell shell running.
-- Rust 1.92 or newer and Cargo, to build the backend.
-- Qt 6 Declarative and Qt Test modules, to run the QML component tests.
-- Bash, coreutils, findutils, `jq`, and the `omarchy` and `omarchy-shell`
-  commands, for the installer.
-- `grim` and `slurp` for screen capture. Install with `omarchy pkg add grim slurp`.
-- Voxtype for dictation, optional. The `voxtype-bin` package provides the
-  `voxtype` command. Configure it for your microphone before use.
-- An authenticated `codex` CLI for AI analysis, optional.
-
-## Install
-
-Clone the repository and run its installer:
-
-```sh
-git clone https://github.com/cordrogue/omatate.git
-cd omatate
-./install.sh
-omatate open
-```
-
-The installer runs `omarchy plugin validate` on the source, builds both Rust
-executables with `cargo build --locked --release`, copies the plugin files
-including source and docs to the plugin directory, links the four launchers into
-`~/.local/bin`, rescans plugins, and enables the panel. Add `~/.local/bin` to
-your PATH if it is not there.
-
-It refuses to touch a plugin directory it did not create, and refuses to
-replace a launcher link that points somewhere other than a Omatate checkout.
-On an update it checks the installed files against recorded checksums and
-stops if you edited any of them. If a panel is running it asks it to save and
-close before building. A failed build leaves the installed files as they were.
-Re-run the installer from the checkout after pulling changes.
-
-Omarchy's git installer can also fetch the checkout, but it does not build:
-
-```sh
-omarchy plugin add https://github.com/cordrogue/omatate.git --yes
-cd ~/.config/omarchy/plugins/cordrogue.omatate
-./install.sh
-```
-
-After `omarchy plugin update cordrogue.omatate`, run `./install.sh` in that
-directory again.
-
-`./install.sh --no-enable` builds and copies without talking to the running
-shell. `OMATATE_PLUGIN_DIR` and `OMATATE_INSTALL_DIR` override the plugin and
-launcher directories for staging.
-
-## Upgrading from UI Notes
-
-Omatate installs as `cordrogue.omatate` and disables `cordrogue.ui-notes`.
-The old plugin folder stays in place as a backup. Do not enable both plugins.
-The `ui-notes` and `ui-notes-panel` commands remain aliases, so existing
-Hyprland bindings and the `ui-notes` layer rule continue to work.
-
-Project formats, configuration, runtime files, and project history retain their
-existing `ui-notes` paths. No notes or folders need to move. An explicit saved
-AI setting remains in effect; a missing or invalid setting now means off.
-Legacy `UI_NOTES_MODEL`, `UI_NOTES_REASONING`, `UI_NOTES_EXECUTABLE`,
-`UI_NOTES_PLUGIN_DIR`, and `UI_NOTES_INSTALL_DIR` variables remain supported.
-The corresponding `OMATATE_` variables take precedence.
-
-## Use
-
-`omatate open` restores the last project or shows the project selector.
-`omatate open-project /path/to/project` opens a folder from the command line.
-The panel's project controls switch folders or create a project.
-
-Drafts save after a typing pause. Ctrl+Return or Ctrl+S saves a new note.
-Existing notes save as you edit them. Search filters note text, descriptions,
-and section titles. Ctrl+Delete removes the focused saved note. Ctrl+H or F1
-opens help with the current shortcuts.
-Ctrl+Shift+O cycles the panel, clip preview, and popup controls through 100%,
-80%, 60%, and 40% opacity. The setting lasts for the current plugin session.
-
-`omatate clip` opens the rectangle picker. Escape cancels. Clips are saved
-under the project's `assets/` folder and appear as relative image links in
-`notes.md`. `omatate stop` saves the draft and ends the session.
-`omatate help` lists every command.
-
-Add bindings like these to your Hyprland Lua configuration. Skip the two HOME
-lines if you do not want dictation.
-
-```lua
-hl.layer_rule({ match = { namespace = "ui-notes" }, no_anim = true, animation = "none" })
-o.bind("SUPER + SHIFT + U", "Omatate session (toggle)", "omatate toggle")
-o.bind("SUPER + U", "Omatate keyboard focus", "omatate focus-toggle")
-o.bind("HOME", "Start dictation (push-to-talk)", "omatate ptt start")
-o.bind("HOME", "Stop dictation (push-to-talk)", "omatate ptt stop", { release = true })
-```
-
-Super+U transfers keyboard focus between Omatate and the previously focused
-Hyprland application without hiding the panel. Super+Shift+U still opens or
-ends the notes session.
-The mouse can also transfer focus to another window while the notes stay visible.
-
-With those bindings, HOME dictates into Omatate when the new note editor has
-focus and behaves as plain Voxtype dictation everywhere else.
-
-## Configuration
-
-`OMATATE_MODEL` and `OMATATE_REASONING` set the Codex model and reasoning
-effort for AI analysis. The model defaults to `gpt-5.6-sol`, and reasoning
-defaults to `low`.
-
-Shortcut defaults are in [share/keys.toml](share/keys.toml). Copy it to
-`$XDG_CONFIG_HOME/ui-notes/keys.toml`, or `~/.config/ui-notes/keys.toml` when
-that variable is unset, and keep only the actions you want to change.
-Press Alt+Shift+Enter to expand or collapse the focused saved note. Customize
-this shortcut with `expand_note`; it also appears in the help menu.
-Customize the opacity shortcut with `cycle_opacity`.
-
-Colors and font come from Ghostty's effective configuration when Ghostty is
-installed, with the current Omarchy theme and font as fallbacks. The panel
-refreshes when those source files change.
-
 ## Remove
 
-```sh
-./uninstall.sh
-```
-
-This asks a running panel to save, disables the plugin, removes the four
-launcher links if they point at this plugin, and removes the installed files
-whose checksums still match what the installer wrote. Edited files, unrelated
-files, and the plugin directory itself when not empty are kept and reported.
-For a git-installed plugin the checkout stays; remove it with
-`omarchy plugin remove cordrogue.omatate`. `--no-disable` skips the shell
-commands for a staging directory.
-
-The uninstaller never touches your notes or settings. To remove those too:
+For either installation method, run the installed uninstaller:
 
 ```sh
-rm -r ~/.local/state/ui-notes ~/.config/ui-notes
-rm -r "$XDG_RUNTIME_DIR/ui-notes"
+"$HOME/.config/omarchy/plugins/cordrogue.omatate/uninstall.sh"
 ```
 
-Project folders, including anything under `~/Documents/ui-notes/`, are yours
-to delete or keep.
+It saves and closes a running panel, disables the plugin, and removes its
+launcher links. For a copied installation, it removes files whose checksums
+still match the installed version, preserving and reporting edited or
+unrelated files.
+
+For a plugin-manager installation, the checkout and build files remain.
+After the uninstaller completes, remove that checkout with:
+
+```sh
+omarchy plugin remove cordrogue.omatate
+```
+
+Run the uninstaller first so launcher links are cleaned up before the plugin
+directory disappears. `--no-disable` skips shell commands for staging.
+
+Your notes, captures, settings, and project history remain. Project folders,
+including anything under `~/Documents/omatate/`, are yours to keep or delete.
+The [file locations](#privacy-and-files) list identifies the remaining settings
+and state.
 
 ## Development
+
+Development additionally requires the Qt 6 Declarative and Qt Test modules
+for the QML component tests.
 
 ```sh
 cargo fmt --check
@@ -261,12 +312,13 @@ omarchy plugin list --json
 qs log -p "$OMARCHY_PATH/shell" --tail 100
 ```
 
-The running shell keeps the QML it already compiled, so QML edits take effect
-only after `omarchy-restart-shell`. A copied installation needs `./install.sh`
+Current Quattro builds watch local plugin files and reload them on changes.
+`omarchy-shell shell rescanPlugins` requests a rescan and reload. On older
+builds, or if changed QML is still stale, use `omarchy restart shell` after
+saving and closing the panel. A copied installation needs `./install.sh`
 after source edits. An installed git checkout can be edited in place, but Rust
-changes still need a rebuild. `omarchy-shell shell rescanPlugins` forces
-discovery. The panel shares Omarchy's Quickshell process, so never launch a
-second Quickshell for it. See the
+changes still need a rebuild. The panel shares Omarchy's Quickshell process,
+so never launch a second Quickshell for it. See the
 [Omarchy plugin guide](https://plugins.omarchy.org/develop.html) and the
 [shell reference](https://github.com/omacom/omarchy/blob/quattro/docs/omarchy-shell.md).
 

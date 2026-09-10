@@ -1,14 +1,10 @@
 # Omatate 0.3.0
 
-UI Notes is now Omatate, universal annotation for Omarchy.
+Universal annotation for Omarchy.
 
 - The plugin ID is `cordrogue.omatate`; the commands are `omatate` and
   `omatate-panel`.
-- Existing `ui-notes` commands remain compatibility aliases. Storage paths,
-  project files, shortcuts, and the layer namespace remain compatible.
-- Installation disables the old UI Notes plugin and preserves its directory.
 - AI screen analysis is off unless the user has explicitly saved `on`.
-  Existing explicit preferences remain in effect.
 - Backend snapshots reuse mutation results, file replacement preserves private
   permissions, and mouse focus can leave the panel without hiding it.
 
@@ -22,7 +18,7 @@ Checked September 10, 2026 on Omarchy 4.0.3 with Qt 6.11.2:
   passed.
 - All 12 headless QML test cases passed. Manifest validation passed.
 - `tests/check-install.py` passed fresh installation, repeat installation,
-  legacy aliases and settings, modified-file protection, unrelated-launcher
+  settings preservation, modified-file protection, unrelated-launcher
   protection, and uninstall without deleting notes or settings.
 - The installed plugin passed open, hide/show, focus transfer, keyboard note
   saving, search, project switching, capture cancellation, shell restart and

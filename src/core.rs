@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 
 pub fn runtime_dir() -> PathBuf {
     match env::var_os("XDG_RUNTIME_DIR").filter(|base| !base.is_empty()) {
-        Some(base) => PathBuf::from(base).join("ui-notes"),
-        None => PathBuf::from(format!("/tmp/ui-notes-{}", unsafe { libc::getuid() })),
+        Some(base) => PathBuf::from(base).join("omatate"),
+        None => PathBuf::from(format!("/tmp/omatate-{}", unsafe { libc::getuid() })),
     }
 }
 
 pub fn session_path() -> Option<PathBuf> {
-    let pinned = env::var_os("UI_NOTES_SESSION_PATH").map(PathBuf::from);
-    let worker_id = env::var("UI_NOTES_SESSION_ID").ok();
+    let pinned = env::var_os("OMATATE_SESSION_PATH").map(PathBuf::from);
+    let worker_id = env::var("OMATATE_SESSION_ID").ok();
     resolve_session(pinned, worker_id.as_deref(), pointer_path(), |path| {
         fs::read_to_string(path.join(".data/id")).ok()
     })
@@ -221,7 +221,7 @@ pub fn filename_timestamp() -> String {
 }
 
 pub fn ai_enabled() -> bool {
-    fs::read_to_string(home().join(".config/ui-notes/ai"))
+    fs::read_to_string(home().join(".config/omatate/ai"))
         .map(|s| s.trim() == "on")
         .unwrap_or(false)
 }
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn atomic_write_removes_temp_file_after_rename_failure() {
-        let root = env::temp_dir().join(format!("ui-notes-atomic-write-test-{}", unsafe {
+        let root = env::temp_dir().join(format!("omatate-atomic-write-test-{}", unsafe {
             libc::getpid()
         }));
         let path = root.join("destination");
@@ -394,8 +394,7 @@ mod tests {
 
     #[test]
     fn locked_writers_preserve_each_others_records() {
-        let root =
-            env::temp_dir().join(format!("ui-notes-lock-test-{}", unsafe { libc::getpid() }));
+        let root = env::temp_dir().join(format!("omatate-lock-test-{}", unsafe { libc::getpid() }));
         let _ = fs::remove_dir_all(&root);
         let session = root.join("session");
         fs::create_dir_all(session.join(".data")).unwrap();
@@ -425,9 +424,8 @@ mod tests {
 
     #[test]
     fn render_matches_contract_golden_output() {
-        let root = env::temp_dir().join(format!("ui-notes-render-test-{}", unsafe {
-            libc::getpid()
-        }));
+        let root =
+            env::temp_dir().join(format!("omatate-render-test-{}", unsafe { libc::getpid() }));
         let _ = fs::remove_dir_all(&root);
         let session = root.join("20260904-120000-checkout");
         fs::create_dir_all(session.join(".data")).unwrap();
@@ -452,7 +450,7 @@ mod tests {
     #[test]
     fn render_uses_filename_and_today_for_non_timestamp_session() {
         let root =
-            env::temp_dir().join(format!("ui-notes-label-test-{}", unsafe { libc::getpid() }));
+            env::temp_dir().join(format!("omatate-label-test-{}", unsafe { libc::getpid() }));
         let session = root.join("project-name");
         fs::create_dir_all(session.join(".data")).unwrap();
         fs::write(session.join(".data/entries.jsonl"), "").unwrap();

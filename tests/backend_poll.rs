@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn backend_poll_detects_changes_and_caches_mutation_snapshots() {
-    let root = std::env::temp_dir().join(format!("ui-notes-backend-poll-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("omatate-backend-poll-{}", std::process::id()));
     let home = root.join("home");
     let runtime = root.join("runtime");
     let state = root.join("state");
@@ -15,7 +15,7 @@ fn backend_poll_detects_changes_and_caches_mutation_snapshots() {
     let session = root.join("project");
     for path in [
         home.clone(),
-        runtime.join("ui-notes"),
+        runtime.join("omatate"),
         state.clone(),
         config.clone(),
         bin.clone(),
@@ -36,7 +36,7 @@ fn backend_poll_detects_changes_and_caches_mutation_snapshots() {
     fs::write(&entries, format!("{first}\n")).unwrap();
     fs::write(session.join(".data/id"), "abc").unwrap();
     fs::write(
-        runtime.join("ui-notes/session"),
+        runtime.join("omatate/session"),
         format!("{}\n", session.display()),
     )
     .unwrap();
@@ -47,8 +47,8 @@ fn backend_poll_detects_changes_and_caches_mutation_snapshots() {
         .env("XDG_STATE_HOME", &state)
         .env("XDG_CONFIG_HOME", &config)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .env_remove("UI_NOTES_SESSION_PATH")
-        .env_remove("UI_NOTES_SESSION_ID")
+        .env_remove("OMATATE_SESSION_PATH")
+        .env_remove("OMATATE_SESSION_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

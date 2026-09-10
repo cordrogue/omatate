@@ -1,7 +1,5 @@
 /target/
-/.ui-notes-install
-/.ui-notes-files
-/REPORT.md
-/docs/investigations/
 /.omatate-install
 /.omatate-files
+/REPORT.md
+/docs/investigations/

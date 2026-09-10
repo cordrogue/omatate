@@ -11,11 +11,11 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "ui-notes-storage-stability-{}-{}",
+            "omatate-storage-stability-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(root.join("home/.config/ui-notes")).unwrap();
+        fs::create_dir_all(root.join("home/.config/omatate")).unwrap();
         Self(root)
     }
 }
@@ -29,7 +29,7 @@ impl Drop for Fixture {
 #[test]
 fn atomic_replacement_preserves_private_file_permissions() {
     let fixture = Fixture::new();
-    let config = fixture.0.join("home/.config/ui-notes/ai");
+    let config = fixture.0.join("home/.config/omatate/ai");
     fs::write(&config, "off\n").unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
 

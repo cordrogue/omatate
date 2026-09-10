@@ -45,10 +45,10 @@ fn snapshot_stamp(theme: &Value, projects: &BTreeSet<String>) -> String {
         });
     }
     for path in [
-        core::home().join(".config/ui-notes/ai"),
+        core::home().join(".config/omatate/ai"),
         crate::keyboard::config_path(),
         crate::registry(),
-        core::home().join("Documents/ui-notes"),
+        core::home().join("Documents/omatate"),
     ] {
         parts.push(metadata_stamp(&path));
     }
@@ -329,7 +329,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let session = std::env::temp_dir().join(format!("ui-notes-backend-{nonce}"));
+        let session = std::env::temp_dir().join(format!("omatate-backend-{nonce}"));
         fs::create_dir_all(session.join(".data")).unwrap();
         fs::write(session.join(".data/entries.jsonl"), "invalid JSON\n").unwrap();
 

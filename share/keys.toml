@@ -1,5 +1,5 @@
-# Copy this file to $XDG_CONFIG_HOME/ui-notes/keys.toml.
-# If XDG_CONFIG_HOME is unset, use ~/.config/ui-notes/keys.toml.
+# Copy this file to $XDG_CONFIG_HOME/omatate/keys.toml.
+# If XDG_CONFIG_HOME is unset, use ~/.config/omatate/keys.toml.
 # Remove actions you do not want to override. Use [] to disable an action.
 # Duplicate bindings are rejected. Escape and Tab are reserved, as are bare printable
 # keys and printable keys modified only by Shift.

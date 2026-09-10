@@ -33,7 +33,7 @@ pub(crate) fn config_path() -> PathBuf {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| omatate::core::home().join(".config"))
-        .join("ui-notes/keys.toml")
+        .join("omatate/keys.toml")
 }
 
 // Accept the existing GTK accelerator spelling as well as Qt's portable spelling.

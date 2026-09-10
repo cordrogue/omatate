@@ -21,12 +21,12 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "ui-notes-rust-tests-{}-{}",
+            "omatate-rust-tests-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let home = root.join("home");
-        let runtime = root.join("runtime/ui-notes");
+        let runtime = root.join("runtime/omatate");
         let state = root.join("state");
         let bin = root.join("bin");
         for p in [&home, &runtime, &bin] {
@@ -51,8 +51,8 @@ impl Fixture {
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
             .env("XDG_STATE_HOME", &self.state)
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
-            .env_remove("UI_NOTES_SESSION_PATH")
-            .env_remove("UI_NOTES_SESSION_ID")
+            .env_remove("OMATATE_SESSION_PATH")
+            .env_remove("OMATATE_SESSION_ID")
             .output()
             .unwrap()
     }
@@ -70,7 +70,7 @@ impl Fixture {
         self.runtime.join("session")
     }
     fn make_session(&self, name: &str, draft: Option<&[u8]>, active: bool) -> PathBuf {
-        let s = self.home.join("Documents/ui-notes").join(name);
+        let s = self.home.join("Documents/omatate").join(name);
         for p in [
             s.join(".data/transcripts"),
             s.join(".data/context"),
@@ -139,13 +139,13 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 fn registry(f: &Fixture) -> Vec<String> {
-    serde_json::from_slice(&fs::read(f.state.join("ui-notes/projects.json")).unwrap()).unwrap()
+    serde_json::from_slice(&fs::read(f.state.join("omatate/projects.json")).unwrap()).unwrap()
 }
 
 fn write_registry(f: &Fixture, projects: &[&Path]) {
-    fs::create_dir_all(f.state.join("ui-notes")).unwrap();
+    fs::create_dir_all(f.state.join("omatate")).unwrap();
     fs::write(
-        f.state.join("ui-notes/projects.json"),
+        f.state.join("omatate/projects.json"),
         serde_json::to_vec(
             &projects
                 .iter()
@@ -234,8 +234,8 @@ fn open_keeps_the_active_project_ahead_of_the_registry() {
 fn open_falls_back_to_the_chooser_when_the_last_project_or_registry_is_invalid() {
     for case in 0..4 {
         let f = Fixture::new();
-        fs::create_dir_all(f.state.join("ui-notes")).unwrap();
-        let registry = f.state.join("ui-notes/projects.json");
+        fs::create_dir_all(f.state.join("omatate")).unwrap();
+        let registry = f.state.join("omatate/projects.json");
         let older = f.make_session("older", Some(b"Do not open"), false);
         match case {
             0 => fs::write(&registry, "broken JSON").unwrap(),
@@ -447,7 +447,7 @@ fn projects_merge_registry_active_and_legacy_deduplicated() {
     f.ok(&["stop"]);
     let alias = f.root.join("alias");
     std::os::unix::fs::symlink(&p, &alias).unwrap();
-    let reg = f.state.join("ui-notes/projects.json");
+    let reg = f.state.join("omatate/projects.json");
     fs::write(
         &reg,
         serde_json::to_vec(&json!([alias, legacy, f.root.join("missing")])).unwrap(),
@@ -467,8 +467,8 @@ fn projects_merge_registry_active_and_legacy_deduplicated() {
 #[test]
 fn malformed_registry_is_preserved_and_warned() {
     let f = Fixture::new();
-    fs::create_dir_all(f.state.join("ui-notes")).unwrap();
-    let reg = f.state.join("ui-notes/projects.json");
+    fs::create_dir_all(f.state.join("omatate")).unwrap();
+    let reg = f.state.join("omatate/projects.json");
     fs::write(&reg, "broken JSON").unwrap();
     let p = f.root.join("new");
     fs::create_dir(&p).unwrap();
@@ -733,7 +733,7 @@ fn clip_rolls_back_on_session_change_and_render_failure() {
     script(
         &f.bin.join("slurp"),
         &format!(
-            "#!/bin/sh\nprintf '{}\\n' > \"$XDG_RUNTIME_DIR/ui-notes/session\"\nprintf '1,2 3x4\\n'\n",
+            "#!/bin/sh\nprintf '{}\\n' > \"$XDG_RUNTIME_DIR/omatate/session\"\nprintf '1,2 3x4\\n'\n",
             other.display()
         ),
     );
@@ -950,7 +950,7 @@ fn section_ai_help_invalid_and_render_contract() {
 fn ai_requires_explicit_opt_in_and_preserves_legacy_preference() {
     let f = Fixture::new();
     assert_eq!(text(&f.ok(&["ai"]).stdout), "off\n");
-    let config = f.home.join(".config/ui-notes/ai");
+    let config = f.home.join(".config/omatate/ai");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     for (value, expected) in [
         ("", "off\n"),
@@ -1057,8 +1057,8 @@ impl Fixture {
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
             .env("XDG_STATE_HOME", &self.state)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env_remove("UI_NOTES_SESSION_PATH")
-            .env_remove("UI_NOTES_SESSION_ID")
+            .env_remove("OMATATE_SESSION_PATH")
+            .env_remove("OMATATE_SESSION_ID")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1227,8 +1227,8 @@ fn backend_saved_note_remains_success_with_bad_registry_and_markdown_failure() {
     let session = f.make_session("render-failure", Some(b"draft"), true);
     fs::remove_file(session.join("notes.md")).unwrap();
     fs::create_dir(session.join("notes.md")).unwrap();
-    fs::create_dir_all(f.state.join("ui-notes")).unwrap();
-    fs::write(f.state.join("ui-notes/projects.json"), "invalid JSON").unwrap();
+    fs::create_dir_all(f.state.join("omatate")).unwrap();
+    fs::write(f.state.join("omatate/projects.json"), "invalid JSON").unwrap();
     let replies = f.backend(&[json!({"id":1,"cmd":"note","session":session,"token":"test-session-id","text":"saved once"})]);
     assert_eq!(replies[0]["ok"], true);
     assert!(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare mutation response latency for two ui-notes binaries."""
+"""Compare mutation response latency for two omatate binaries."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def measure(binary: Path, entries_count: int, repetitions: int) -> list[float]:
-    with tempfile.TemporaryDirectory(prefix="ui-notes-backend-bench-") as root:
+    with tempfile.TemporaryDirectory(prefix="omatate-backend-bench-") as root:
         root = Path(root)
         session = root / "session"
         data = session / ".data"
@@ -42,7 +42,7 @@ def measure(binary: Path, entries_count: int, repetitions: int) -> list[float]:
                 "XDG_CONFIG_HOME": str(root / "config"),
                 "XDG_RUNTIME_DIR": str(runtime),
                 "XDG_STATE_HOME": str(root / "state"),
-                "UI_NOTES_SESSION_PATH": str(session),
+                "OMATATE_SESSION_PATH": str(session),
             }
         )
         process = subprocess.Popen(

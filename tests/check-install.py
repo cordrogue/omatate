@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Exercise install, update, legacy aliases, and removal in temporary directories."""
+"""Exercise install, update, settings preservation, and removal in temporary directories."""
 
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -13,17 +12,12 @@ with tempfile.TemporaryDirectory(prefix="omatate-install-test-") as temporary:
     root = Path(temporary)
     home = root / "home"
     plugin = home / ".config/omarchy/plugins/cordrogue.omatate"
-    legacy = home / ".config/omarchy/plugins/cordrogue.ui-notes"
     launchers = home / ".local/bin"
-    legacy.mkdir(parents=True)
     launchers.mkdir(parents=True)
-    (legacy / "manifest.json").write_text(json.dumps({"id": "cordrogue.ui-notes"}))
-    for name in ("ui-notes", "ui-notes-panel"):
-        (launchers / name).symlink_to(legacy / "bin" / name)
-    config = home / ".config/ui-notes/ai"
+    config = home / ".config/omatate/ai"
     config.parent.mkdir(parents=True)
     config.write_text("on\n")
-    project = home / "Documents/ui-notes/existing"
+    project = home / "Documents/omatate/existing"
     project.mkdir(parents=True)
     (project / "notes.md").write_text("Keep my notes.\n")
     env = dict(os.environ, HOME=str(home), OMATATE_PLUGIN_DIR=str(plugin),
@@ -38,9 +32,9 @@ with tempfile.TemporaryDirectory(prefix="omatate-install-test-") as temporary:
         return result.stdout + result.stderr
 
     run("install.sh", "--no-enable")
-    for name in ("omatate", "omatate-panel", "ui-notes", "ui-notes-panel"):
+    for name in ("omatate", "omatate-panel"):
         assert (launchers / name).resolve() == plugin / "bin" / name
-    for name in ("omatate", "ui-notes"):
+    for name in ("omatate",):
         result = subprocess.run([str(launchers / name), "ai"], env=env,
                                 capture_output=True, text=True, check=True)
         assert result.stdout == "on\n"
@@ -57,10 +51,9 @@ with tempfile.TemporaryDirectory(prefix="omatate-install-test-") as temporary:
     assert all(not p.is_symlink() for p in launchers.iterdir())
     assert config.read_text() == "on\n"
     assert (project / "notes.md").read_text() == "Keep my notes.\n"
-    assert legacy.exists()
     # An unrelated launcher must stop installation before touching its contents.
     (launchers / "omatate").write_text("unrelated executable")
     env["OMATATE_PLUGIN_DIR"] = str(root / "another-plugin")
     assert "refusing to replace a file" in run("install.sh", "--no-enable", False)
     assert (launchers / "omatate").read_text() == "unrelated executable"
-print("PASS: install, update, aliases, legacy settings, edited-file protection, removal")
+print("PASS: install, update, settings preservation, edited-file protection, removal")

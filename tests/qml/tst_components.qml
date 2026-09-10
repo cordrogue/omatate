@@ -1,9 +1,9 @@
 import QtQuick
 import QtTest
-import "../../qml" as UiNotes
+import "../../qml" as Omatate
 
 TestCase {
-    name: "UiNotesComponents"
+    name: "OmatateComponents"
 
     QtObject {
         id: testTheme
@@ -22,22 +22,22 @@ TestCase {
 
     Component {
         id: buttonComponent
-        UiNotes.NoteButton {}
+        Omatate.NoteButton {}
     }
 
     Component {
         id: fieldComponent
-        UiNotes.NoteField {}
+        Omatate.NoteField {}
     }
 
     Component {
         id: editorComponent
-        UiNotes.NoteEditor {}
+        Omatate.NoteEditor {}
     }
 
     Component {
         id: iconComponent
-        UiNotes.NoteIcon {}
+        Omatate.NoteIcon {}
     }
 
     function test_button_state_and_sizing() {

@@ -5,8 +5,7 @@ CLI operations, dictation, captures, and analysis. Dictation is delegated to the
 `voxtype` command, captures to `grim` and `slurp`, and analysis to `codex exec`
 running in read-only sandbox mode with the screenshot attached and the project
 folder as its working directory. Those tools are the only paths by which data
-leaves the machine, and each is optional. The migration keeps the project
-storage format and existing `ui-notes` commands.
+leaves the machine, and each is optional.
 
 ## Components
 
@@ -20,12 +19,12 @@ storage format and existing `ui-notes` commands.
   rendering. `src/keyboard.rs` loads shortcut overrides.
 - `src/bin/omatate-panel.rs` summons this plugin through Omarchy shell IPC.
   It does not start another Quickshell process.
-- `bin/ui-notes` and `bin/ui-notes-panel` are regular wrapper files that run the
+- `bin/omatate` and `bin/omatate-panel` are regular wrapper files that run the
   corresponding binary under `target/release/`. Plugin folders cannot contain
   symlinks. External CLI links in `~/.local/bin` point to these wrappers.
 
 The frontend normally resolves its backend relative to the plugin directory.
-`UI_NOTES_EXECUTABLE` can override that backend path for development.
+`OMATATE_EXECUTABLE` can override that backend path for development.
 
 ## Project storage
 
@@ -60,7 +59,7 @@ Existing GTK sessions use this same format and need no data migration.
 
 ## Runtime and user state
 
-Runtime files live under `$XDG_RUNTIME_DIR/ui-notes`, or `/tmp/ui-notes-$UID` when
+Runtime files live under `$XDG_RUNTIME_DIR/omatate`, or `/tmp/omatate-$UID` when
 XDG runtime storage is unset. `session` holds the active absolute project path,
 `lock` coordinates writers, and `panel.sock` carries CLI requests to QML.
 Full-screen AI images live under `shots/`. A detached cleanup process deletes
@@ -69,13 +68,13 @@ failure before the analysis worker launches can leave a file for `start` to
 clear later. They do not become permanent project assets. The CLI's `start`
 command clears old runtime captures. `stop` never erases notes or clips in a
 project you chose; it does remove an auto-named project under
-`~/Documents/ui-notes` when that project has no records, draft, or assets.
+`~/Documents/omatate` when that project has no records, draft, or assets.
 
-Known projects live at `$XDG_STATE_HOME/ui-notes/projects.json`, defaulting to
-`~/.local/state/ui-notes/projects.json`. AI mode lives at
-`~/.config/ui-notes/ai`. Shortcut overrides use
-`$XDG_CONFIG_HOME/ui-notes/keys.toml`, defaulting to
-`~/.config/ui-notes/keys.toml`. Only an explicit `on` value enables AI. Missing, unreadable, or invalid configuration means disabled.
+Known projects live at `$XDG_STATE_HOME/omatate/projects.json`, defaulting to
+`~/.local/state/omatate/projects.json`. AI mode lives at
+`~/.config/omatate/ai`. Shortcut overrides use
+`$XDG_CONFIG_HOME/omatate/keys.toml`, defaulting to
+`~/.config/omatate/keys.toml`. Only an explicit `on` value enables AI. Missing, unreadable, or invalid configuration means disabled.
 
 ## Backend JSON protocol
 

@@ -17,7 +17,7 @@ Item {
     property var manifest: null
     property var pluginRegistry: null
     property var barWidgetRegistry: null
-    property string executable: Quickshell.env("OMATATE_EXECUTABLE") || Quickshell.env("UI_NOTES_EXECUTABLE") || localPath(Qt.resolvedUrl("target/release/omatate"))
+    property string executable: Quickshell.env("OMATATE_EXECUTABLE") || localPath(Qt.resolvedUrl("target/release/omatate"))
     property bool shown: false
     property bool opened: false
     property bool minimized: false
@@ -524,7 +524,7 @@ Item {
         implicitWidth: Math.min(toolbar.implicitWidth, screen ? screen.width - 24 : toolbar.implicitWidth)
         implicitHeight: Math.min(panelContent.implicitHeight, (screen ? screen.height : 900) - root.topGap - 12)
         exclusionMode: ExclusionMode.Ignore
-        WlrLayershell.namespace: "ui-notes"
+        WlrLayershell.namespace: "omatate"
         WlrLayershell.layer: root.screensaverVisible ? WlrLayer.Top : WlrLayer.Overlay
         WlrLayershell.keyboardFocus: !root.screensaverVisible && root.focusAllowed ? (panelFocusGrab.active ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.OnDemand) : WlrKeyboardFocus.None
         contentItem.opacity: root.panelOpacity
@@ -857,7 +857,7 @@ Item {
             height: root.previewAsset ? previewWindow.height : 0
         }
         exclusionMode: ExclusionMode.Ignore
-        WlrLayershell.namespace: "ui-notes"
+        WlrLayershell.namespace: "omatate"
         WlrLayershell.layer: root.screensaverVisible ? WlrLayer.Top : WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
         contentItem.opacity: root.panelOpacity
@@ -895,7 +895,7 @@ Item {
         implicitHeight: Math.min(helpContent.implicitHeight, 520, Math.max(1, (screen ? screen.height : 900) - root.topGap - 30)) + 18
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
-        WlrLayershell.namespace: "ui-notes"
+        WlrLayershell.namespace: "omatate"
         WlrLayershell.layer: root.screensaverVisible ? WlrLayer.Top : WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
         contentItem.opacity: root.panelOpacity

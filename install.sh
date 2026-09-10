@@ -2,11 +2,9 @@
 set -euo pipefail
 
 plugin_id=cordrogue.omatate
-legacy_id=cordrogue.ui-notes
-legacy_dir=$HOME/.config/omarchy/plugins/$legacy_id
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-plugin_dir=${OMATATE_PLUGIN_DIR:-${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}}
-install_dir=${OMATATE_INSTALL_DIR:-${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}}
+plugin_dir=${OMATATE_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}
+install_dir=${OMATATE_INSTALL_DIR:-$HOME/.local/bin}
 enable=true
 case "${1:-}" in
   --no-enable) enable=false ;;
@@ -34,15 +32,13 @@ if [[ -f $plugin_dir/.omatate-install ]]; then
   (cd "$plugin_dir" && sha256sum --check --quiet .omatate-files) \
     || fail "installed files were edited or removed; save those changes before reinstalling"
 fi
-for name in omatate omatate-panel ui-notes ui-notes-panel; do
+for name in omatate omatate-panel; do
   link=$install_dir/$name
   if [[ -e $link || -L $link ]]; then
     [[ -L $link ]] || fail "refusing to replace a file: $link"
     destination=$(readlink -- "$link")
     [[ $destination == "$project_dir/bin/$name" || $destination == "$plugin_dir/bin/$name" \
-      || $destination == "$project_dir/target/release/$name" \
-      || ( $name == ui-notes* && $destination == "$legacy_dir/bin/$name" \
-        && -f $legacy_dir/manifest.json && $(jq -r .id "$legacy_dir/manifest.json") == "$legacy_id" ) ]] \
+      || $destination == "$project_dir/target/release/$name" ]] \
       || fail "refusing to replace an unrelated link: $link"
   fi
 done
@@ -50,10 +46,9 @@ done
 # Flush a loaded panel before replacing its code. Staging skips desktop IPC.
 if $enable; then
   runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
-  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/ui-notes; else runtime_dir=$runtime_dir/ui-notes-$(id -u); fi
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/omatate; else runtime_dir=$runtime_dir/omatate-$(id -u); fi
   if [[ -S $runtime_dir/panel.sock ]]; then
     current_cli=$install_dir/omatate
-    [[ -x $current_cli ]] || current_cli=$install_dir/ui-notes
     [[ -x $current_cli ]] || fail "panel is running but its installed CLI is unavailable"
     if flush_reply=$("$current_cli" panel quit 2>&1); then
       jq -e '.ok == true' <<< "$flush_reply" >/dev/null \
@@ -116,14 +111,10 @@ if [[ $project_dir != "$plugin_dir" ]]; then
 fi
 omarchy plugin validate "$plugin_dir"
 mkdir -p "$install_dir"
-for name in omatate omatate-panel ui-notes ui-notes-panel; do
+for name in omatate omatate-panel; do
   ln -sfn -- "$plugin_dir/bin/$name" "$install_dir/$name"
 done
 if $enable; then
-  if [[ -f $legacy_dir/manifest.json && $(jq -r .id "$legacy_dir/manifest.json") == "$legacy_id" ]]; then
-    omarchy plugin disable "$legacy_id"
-    echo "Disabled the previous UI Notes plugin. Its files remain at $legacy_dir."
-  fi
   omarchy-shell shell rescanPlugins >/dev/null
   discovered=false
   for ((attempt = 0; attempt < 30; attempt++)); do

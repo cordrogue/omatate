@@ -2,8 +2,8 @@
 set -euo pipefail
 
 plugin_id=cordrogue.omatate
-plugin_dir=${OMATATE_PLUGIN_DIR:-${UI_NOTES_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}}
-install_dir=${OMATATE_INSTALL_DIR:-${UI_NOTES_INSTALL_DIR:-$HOME/.local/bin}}
+plugin_dir=${OMATATE_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/$plugin_id}
+install_dir=${OMATATE_INSTALL_DIR:-$HOME/.local/bin}
 disable=true
 case "${1:-}" in
   --no-disable) disable=false ;;
@@ -15,7 +15,7 @@ plugin_dir=$(realpath -m -- "$plugin_dir")
 install_dir=$(realpath -m -- "$install_dir")
 if $disable && [[ -d $plugin_dir ]]; then
   runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
-  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/ui-notes; else runtime_dir=$runtime_dir/ui-notes-$(id -u); fi
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then runtime_dir=$runtime_dir/omatate; else runtime_dir=$runtime_dir/omatate-$(id -u); fi
   if [[ -S $runtime_dir/panel.sock ]]; then
     if flush_reply=$("$install_dir/omatate" panel quit 2>&1); then
       jq -e '.ok == true' <<< "$flush_reply" >/dev/null || {
@@ -32,7 +32,7 @@ if $disable && [[ -d $plugin_dir ]]; then
   fi
   omarchy plugin disable "$plugin_id"
 fi
-for name in omatate omatate-panel ui-notes ui-notes-panel; do
+for name in omatate omatate-panel; do
   link=$install_dir/$name
   if [[ -L $link && $(readlink -- "$link") == "$plugin_dir/bin/$name" ]]; then
     rm -- "$link"

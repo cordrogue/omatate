@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 
-source = (Path(__file__).resolve().parents[1] / "Plugin.qml").read_text()
+source = (Path(__file__).resolve().parents[1] / "qml/OmatatePanel.qml").read_text()
 start = source.index("    FolderDialog {")
 end = source.index("\n    }", start) + len("\n    }")
 dialog = source[start:end]

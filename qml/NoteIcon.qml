@@ -18,8 +18,6 @@ Item {
         "plus": "M5 12h14 M12 5v14",
         "collapse": "m18 15-6-6-6 6",
         "expand": "m6 9 6 6 6-6",
-        "chevron-left": "m15 18-6-6 6-6",
-        "chevron-right": "m9 18 6-6-6-6",
         "close": "M18 6 6 18 M6 6 18 18"
     })
 

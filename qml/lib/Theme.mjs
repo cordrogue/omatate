@@ -48,7 +48,8 @@ export function resolve(paletteText, shellText, ghosttyText, font) {
         ghosttyText.split(/\r?\n/).forEach(function(line) {
             var m=/^palette\s*=\s*(\d+)\s*=\s*(#[0-9a-f]+)/i.exec(line)
             var roles={1:'red',2:'green',3:'yellow',4:'accent',8:'muted'}
-            if(m&&roles[m[1]]&&valid(m[2])) colors[roles[m[1]]]=m[2]
+            // ANSI blue is only an accent fallback; the theme names its own accent.
+            if(m&&roles[m[1]]&&valid(m[2])&&!(m[1]==='4'&&valid(palette.accent))) colors[roles[m[1]]]=m[2]
         })
         if(+cfg['font-size']>=6&&+cfg['font-size']<=40) size=+cfg['font-size']
         font=cfg['font-family']||font

@@ -32,7 +32,7 @@ Item {
         model: root.paths
         delegate: Item {
             required property string modelData
-            FileView { path: modelData; watchChanges: true; printErrors: false; onFileChanged: debounce.restart() }
+            FileView { path: modelData; preload: false; watchChanges: true; printErrors: false; onFileChanged: debounce.restart() }
         }
     }
     Timer { id: debounce; interval: 150; onTriggered: root.refresh() }

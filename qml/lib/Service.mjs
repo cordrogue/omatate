@@ -44,11 +44,11 @@ export function create(io, env, hooks) {
     }
     function readProject(path) {
         return Promise.all([io.read(path + '/.data/id'), io.read(path + '/.data/entries.jsonl'),
-            io.read(path + '/.data/draft.txt', true), io.read(path + '/notes.md'), io.read(path + '/.data/pending-note.json', true)]).then(function(values) {
+            io.read(path + '/.data/draft.txt', true), io.read(path + '/.data/pending-note.json', true)]).then(function(values) {
             if (!values[0].trim()) throw new Error('Empty project identity')
             var entries=Notes.parseEntries(values[1]), draft=values[2] || ''
-            if (values[4]) {
-                var receipt=JSON.parse(values[4])
+            if (values[3]) {
+                var receipt=JSON.parse(values[3])
                 if (receipt.token === values[0].trim() && receipt.text === draft
                         && entries.some(e => e.id === receipt.id && e.transcript === receipt.text)) draft=''
             }
@@ -63,7 +63,7 @@ export function create(io, env, hooks) {
             .catch(error => hooks.warning('Project saved, but cannot remember it: ' + error.message))
     }
     function refreshSettings() {
-        return Promise.all([io.read(home + '/.config/omatate/ai', true).catch(() => null), io.read(config + '/keys.toml', true)]).then(function(values) {
+        return Promise.all([io.read(config + '/ai', true).catch(() => null), io.read(config + '/keys.toml', true)]).then(function(values) {
             state.ai = (values[0] || '').trim() === 'on'
             try { state.keys = Settings.keys(values[1] || ''); state.keysWarning = '' }
             catch (error) { state.keys = Settings.keys(''); state.keysWarning = 'Invalid keyboard config: ' + error.message + '. Using defaults.' }
@@ -129,7 +129,7 @@ export function create(io, env, hooks) {
     function recover(project) {
         var changed = false, transcribing = [], analyses = []
         var pending = project.entries.filter(e => (e.status === 'recording' || e.status === 'transcribing') && !transcriptJobs[workerKey(project,e.id)])
-        return io.read(env('XDG_RUNTIME_DIR') + '/voxtype/state',true).then(function(voxtype) {
+        return (pending.length ? io.read(env('XDG_RUNTIME_DIR') + '/voxtype/state',true) : Promise.resolve(null)).then(function(voxtype) {
             return serial(pending,function(entry) {
                 var transcript = project.session + '/.data/transcripts/' + String(entry.id).padStart(3,'0') + '.txt'
                 var record = {owner:{session:project.session,token:project.token},id:entry.id,transcript:transcript}
@@ -190,7 +190,9 @@ export function create(io, env, hooks) {
         return checkActive(expected).then(function() {
             if (cmd === 'draft') {
                 if (typeof request.text !== 'string') throw new Error('Missing draft text')
-                return remove(state.session+'/.data/pending-note.json').then(() => io.write(state.session + '/.data/draft.txt', request.text)).then(function() { state.draft = request.text })
+                // The receipt goes only after the new draft is on disk: a failed
+                // write must not expose the previous note's text to draft recovery.
+                return io.write(state.session + '/.data/draft.txt', request.text).then(() => remove(state.session+'/.data/pending-note.json')).then(function() { state.draft = request.text })
             }
             return io.read(state.session + '/.data/entries.jsonl').then(function(text) {
                 var previous = Notes.parseEntries(text), entries = Notes.mutate(previous, cmd, request)
@@ -223,7 +225,11 @@ export function create(io, env, hooks) {
                     })
 
             })
-        }).then(function() { publish(); return snapshot() })
+        }).then(function() {
+            // commit() already published edits and deletions.
+            if (cmd === 'draft' || cmd === 'note') publish()
+            return snapshot()
+        })
     }
     function clip() {
         var expected = owner(), captured = '', asset = '', dimensions, hidden = false
@@ -263,10 +269,29 @@ export function create(io, env, hooks) {
     }
     function workerKey(expected, id) { return expected.token + ':' + id }
     function validAnalysis(job) {
-        if (!job || typeof job.output !== 'string' || typeof job.status !== 'string' || !Number.isFinite(job.started)) return false
+        if (!job || typeof job.dir !== 'string' || !Number.isFinite(job.started)) return false
         var prefix = runtime + '/workers/'
-        return job.output.indexOf(prefix) === 0 && /^[A-Za-z0-9-]+\.json$/.test(job.output.slice(prefix.length))
-            && job.status === job.output + '.status'
+        return job.dir.indexOf(prefix) === 0 && /^job-[A-Za-z0-9]+$/.test(job.dir.slice(prefix.length))
+            && job.output === job.dir + '/output.json' && job.status === job.dir + '/status' && job.log === job.dir + '/log'
+    }
+    function removeJob(job) {
+        // Deletes relative to the verified workers directory, like the wrapper.
+        return run(['sh','-c','root=$(cd -- "$1" && pwd -P) && cd -- "$root/omatate/workers" && [ "$(pwd -P)" = "$root/omatate/workers" ] && rm -rf -- "./$2"',
+            'omatate-cleanup',env('XDG_RUNTIME_DIR'),job.dir.slice(job.dir.lastIndexOf('/')+1)])
+    }
+    function publishFile(expected, sub, name, source) {
+        // Detached jobs only ever write inside their private runtime directory.
+        // Results are copied into the project by the service: every directory
+        // we own is entered and verified with pwd -P, the file is staged in a
+        // private mktemp directory, the project token is read again right
+        // before the atomic rename, and noclobber keeps every redirection an
+        // exclusive create that never follows a symlink.
+        return checkOwner(expected).then(() => run(['sh','-c',
+            'set -Cu; umask 077; data=$1; sub=$2; name=$3; token=$4; source=$5; '
+            + 'cd -- "$data" && [ "$(pwd -P)" = "$data" ] && mkdir -p -- "$sub" && cd -- "$sub" && [ "$(pwd -P)" = "$data/$sub" ] '
+            + '&& stage=$(mktemp -d ./.publish.XXXXXX) && trap \'rm -rf -- "$stage"\' EXIT && cat -- "$source" > "$stage/file" '
+            + '&& [ "$(cat ../id)" = "$token" ] && mv -fT -- "$stage/file" "$name"',
+            'omatate-publish', expected.session + '/.data', sub, name, expected.token, source]))
     }
     function followAnalysis(expected, entry) {
         var id=entry.id,key=workerKey(expected,id),job=entry.analysis
@@ -280,33 +305,52 @@ export function create(io, env, hooks) {
                 return io.read(job.output).then(Notes.context)
             })
         }
+        // The log is published before the pending metadata is cleared, so a
+        // reload in between can still reconnect to the job.
+        function publishLog() {
+            return publishFile(expected,'logs','analyze-'+String(id).padStart(3,'0')+'.log',job.log)
+                .catch(error => hooks.warning('Cannot save the analysis log: '+error.message))
+        }
         poll().then(function(context) {
-            return checkOwner(expected).then(() => io.write(expected.session+'/.data/context/'+String(id).padStart(3,'0')+'.json',JSON.stringify(context,null,2)+'\n'))
+            return io.write(job.dir+'/context.json',JSON.stringify(context,null,2)+'\n')
+                .then(() => publishFile(expected,'context',String(id).padStart(3,'0')+'.json',job.dir+'/context.json'))
+                .then(publishLog)
                 .then(() => updateEntry(expected,id,function(e) { e.context=context;e.context_status='done';delete e.analysis }))
         }).catch(function(error) {
-            return updateEntry(expected,id,function(e) { delete e.context;delete e.analysis;e.context_status='error' })
+            return publishLog().then(() => updateEntry(expected,id,function(e) { delete e.context;delete e.analysis;e.context_status='error' }))
                 .then(() => hooks.warning('Analysis failed: '+error.message))
         }).then(function() {
-            delete jobs[key];remove(job.output).catch(function() {});remove(job.status).catch(function() {})
+            delete jobs[key];if (validAnalysis(job)) removeJob(job).catch(function() {})
         },function(error) { delete jobs[key];hooks.warning(error.message) })
     }
     function analyze(expected, entry) {
-        var output=runtime+'/workers/'+io.uniqueId()+'.json'
-        var job={output:output,status:output+'.status',started:Date.now()}
-        entry.analysis=job
-        return mkdir(runtime+'/workers').then(function() {
+        var job
+        // Every file the detached job writes lives in a private directory that
+        // mktemp creates exclusively (mode 700) under the runtime directory.
+        return mkdir(runtime+'/workers').then(() => run(['mktemp','-d','--',runtime+'/workers/job-XXXXXXXX'])).then(function(result) {
+            var dir=result.stdout.replace(/[\r\n]+$/,'')
+            job={dir:dir,output:dir+'/output.json',status:dir+'/status',log:dir+'/log',started:Date.now()}
+            if (!validAnalysis(job)) throw new Error('Unexpected analysis directory')
+            entry.analysis=job
             var entries=Notes.clone(state.entries),target=entries.find(e=>e.id===entry.id)
             target.analysis=job
             return commit(expected,entries)
         }).then(function() {
             // The external tool survives shell reloads. Its completion file is
             // polled by the service, and all note writes still use our queue.
+            // The wrapper works relative to its job directory, verified with
+            // pwd -P against the canonical runtime root so no owned component
+            // is a symlink. noclobber makes each redirection an exclusive
+            // create that never follows a symlink; mv -T keeps the rename on
+            // the status name itself. Nothing here writes into the project.
             io.detach(['sh','-c',
-                'input=$1; status=$2; log=$3; shift 3; "$@" < "$input" > "$log" 2>&1; result=$?; printf "%s\\n" "$result" > "$status.tmp"; mv -f -- "$status.tmp" "$status"',
-                'omatate-analysis',io.resource('share/analyze-prompt.md'),job.status,
-                expected.session+'/.data/logs/analyze-'+String(entry.id).padStart(3,'0')+'.log',
+                'set -Cu; umask 077; root=$1; name=$2; input=$3; shift 3; '
+                + 'root=$(cd -- "$root" && pwd -P) && cd -- "$root/omatate/workers/$name" && [ "$(pwd -P)" = "$root/omatate/workers/$name" ] || exit 1; '
+                + '"$@" < "$input" > log 2>&1; result=$?; '
+                + 'tmp=$(mktemp -u ./status.XXXXXX) && printf "%s\\n" "$result" > "$tmp" && mv -fT -- "$tmp" status',
+                'omatate-analysis',env('XDG_RUNTIME_DIR'),job.dir.slice(job.dir.lastIndexOf('/')+1),io.resource('share/analyze-prompt.md'),
                 'timeout','--kill-after=2s','240s','codex','exec','--skip-git-repo-check','--sandbox','read-only',
-                '-C',expected.session,'-i',entry.shot,'--output-schema',io.resource('share/analyze-schema.json'),'-o',output,
+                '-C',expected.session,'-i',entry.shot,'--output-schema',io.resource('share/analyze-schema.json'),'-o',job.output,
                 '-c','model_reasoning_effort='+JSON.stringify(env('OMATATE_REASONING')||'low'),
                 '-m',env('OMATATE_MODEL')||'gpt-5.6-sol','-'])
             followAnalysis(expected,entry)
@@ -432,7 +476,7 @@ export function create(io, env, hooks) {
             if (mode === undefined) return state.ai ? 'on' : 'off'
             if (['on','off','toggle'].indexOf(mode) < 0) throw new Error('Expected ai on, off, or toggle')
             var enabled = mode === 'toggle' ? !state.ai : mode === 'on'
-            return mkdir(home+'/.config/omatate').then(() => io.write(home+'/.config/omatate/ai',enabled ? 'on\n' : 'off\n'))
+            return mkdir(config).then(() => io.write(config+'/ai',enabled ? 'on\n' : 'off\n'))
                 .then(function() { state.ai=enabled; publish(); return enabled ? 'on' : 'off' })
         }
         if (cmd === 'open-project' || cmd === 'resume') return select(args[1],undefined,undefined,cmd === 'resume').then(path => hooks.panel('open').then(() => path))
@@ -478,10 +522,8 @@ export function create(io, env, hooks) {
     service.request = function(cmd, data) {
         return enqueue(function() {
             if (!initialized) throw new Error('Notes are not ready')
-            if (cmd === 'snapshot') return refreshSettings().then(function() {
-                if (!state.session) return
-                return checkActive(owner()).then(() => readProject(state.session)).then(function(project) { Object.assign(state,project) })
-            }).then(snapshot)
+            // A snapshot request waits for earlier queued writes; state is in memory.
+            if (cmd === 'snapshot') return snapshot()
             return mutate(cmd,data)
         })
     }

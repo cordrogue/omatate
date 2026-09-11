@@ -42,6 +42,17 @@ It briefly opens the real panel with temporary projects and checks note
 submission, CLI arguments, project switching, and session closure. It uses
 an isolated shell instance and does not change your installed plugin.
 
+Measure what the plugin costs the shell at startup on a Wayland desktop:
+
+```sh
+python3 tests/bench-startup.py
+```
+
+It loads `Plugin.qml` into a disposable shell with a seeded project registry
+and reports synchronous instantiation time, time to a ready service, processes
+spawned, and resident memory added. The panel UI is not opened, matching what
+the Omarchy shell pays for a `keepLoaded` plugin at login.
+
 For the folder dialog check on a running Wayland desktop:
 
 ```sh

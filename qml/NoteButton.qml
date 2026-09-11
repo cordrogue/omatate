@@ -8,7 +8,7 @@ QQC.Button {
     property bool bare: false
     property string iconName: ""
     property string tooltipText: ""
-    property color textColor: selected ? theme.accent : (hovered ? theme.foreground : theme.muted)
+    property color textColor: iconName || selected ? theme.accent : (hovered ? theme.foreground : theme.muted)
     focusPolicy: Qt.StrongFocus
     hoverEnabled: true
     implicitWidth: iconName ? 32 : Math.max(32, implicitContentWidth + leftPadding + rightPadding)
@@ -46,7 +46,7 @@ QQC.Button {
     background: Rectangle {
         color: button.theme.control
         border.width: 1
-        border.color: button.activeFocus ? button.theme.accent : (button.bare && !button.hovered ? "transparent" : button.theme.hair)
+        border.color: button.activeFocus || button.selected ? button.theme.accent : (button.bare && !button.hovered ? "transparent" : button.theme.hair)
     }
     QQC.ToolTip.visible: hovered && tooltipText.length > 0
     QQC.ToolTip.text: tooltipText

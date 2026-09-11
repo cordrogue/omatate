@@ -59,6 +59,21 @@ TestCase {
         compare(button.implicitHeight, 24)
     }
 
+    function test_icons_use_theme_accent_and_selected_border() {
+        const button = createTemporaryObject(buttonComponent, this, {
+            theme: testTheme,
+            iconName: "sparkle"
+        })
+        verify(button)
+        compare(button.contentItem.children[0].color, testTheme.accent)
+        button.selected = true
+        compare(button.contentItem.children[0].color, testTheme.accent)
+        compare(button.background.border.color, testTheme.accent)
+        button.theme = {accent: "#faa968", foreground: "#f6dcac", muted: "#2a6b78",
+            control: "#05182e", hair: "#40f6dcac", fontFamily: "Sans Serif", fontPointSize: 11}
+        compare(button.contentItem.children[0].color, "#faa968")
+    }
+
     function test_field_applies_theme_and_geometry() {
         const field = createTemporaryObject(fieldComponent, this, {
             theme: testTheme,

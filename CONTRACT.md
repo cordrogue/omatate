@@ -52,10 +52,11 @@ completes. The launcher prints the result, returns a failing status on errors,
 and removes the reply directory. Its only direct feature action is forwarding
 push-to-talk to Voxtype when there is no active Omatate session.
 
-The plugin stays loaded when hidden. The UI preserves the command socket at
-`$XDG_RUNTIME_DIR/omatate/panel.sock` for panel controls. Pending edits save
-before hiding, closing, or changing projects. Screen capture waits until panel,
-preview, and help windows are hidden.
+The storage service stays resident in the shell. The panel UI is created on
+first open and released when the session ends or the shell hides the plugin;
+the active session survives a hide and the next open restores it. Pending
+edits save before hiding, closing, or changing projects. Screen capture waits
+until panel, preview, and help windows are hidden.
 
 Project state lives on disk. The service restores the active project when the
 shell starts and the last known project when the user opens the panel. It
@@ -79,7 +80,7 @@ analysis to finish. Temporary screenshots have detached cleanup jobs.
 
 ## Settings
 
-AI is enabled only by the literal value `on` in `~/.config/omatate/ai`.
+AI is enabled only by the literal value `on` in `$XDG_CONFIG_HOME/omatate/ai`.
 Shortcut overrides use a `[keys]` table of string arrays in
 `$XDG_CONFIG_HOME/omatate/keys.toml`. Multiline arrays, comments, Qt shortcut
 spelling, and angle-bracket modifiers are supported. Unknown actions,

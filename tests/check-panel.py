@@ -29,11 +29,12 @@ ShellRoot {
     IpcHandler {
         target: "shell"
         function summon(id: string, payload: string): string { plugin.open(payload); return "ok" }
-        function state(): string { return JSON.stringify({ready:plugin.ready,session:plugin.session,entries:plugin.entries,error:plugin.hasError?plugin.status:"",opened:plugin.opened}) }
+        function hide(id: string): string { plugin.close(); return "ok" }
+        function state(): string { var p=plugin.panel; return JSON.stringify({ready:plugin.ready,session:p?p.session:"",entries:p?p.entries:[],error:p?(p.hasError?p.status:""):(plugin.hasError?plugin.status:""),opened:plugin.opened}) }
         function note(text: string): void {
             var field=assertions.findChild(plugin,"omatate-draft")
             if (!field) throw new Error("Draft field not found")
-            field.text=text;field.textEdited();plugin.submitNote()
+            field.text=text;field.textEdited();plugin.panel.submitNote()
         }
         function quit(): void { Qt.quit() }
     }
@@ -81,6 +82,17 @@ ShellRoot {
             assert not state["error"], state
             assert cli("section","Details")=="2"
             assert cli("status")==project
+            # The shell's hide closes the panel; the session survives and the next open restores it.
+            ipc("hide","cordrogue.omatate")
+            for _ in range(100):
+                state=json.loads(ipc("state"))
+                if not state["opened"]: break
+                time.sleep(.05)
+            assert not state["opened"] and state["session"]=="", state
+            assert cli("status")==project
+            cli("open")
+            state=json.loads(ipc("state"))
+            assert state["opened"] and state["session"]==project and state["entries"][0]["transcript"]==text, state
             cli("select-project",str(root / "other"),project)
             cli("select-project",project,str(root / "other"))
             assert json.loads(ipc("state"))["entries"][0]["transcript"]==text

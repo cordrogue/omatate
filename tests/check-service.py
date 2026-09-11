@@ -25,7 +25,7 @@ ShellRoot {
     function noteFocused() { return false }
     function require(value, message) { if (!value) throw new Error(message) }
     Notes.FileOps { id: files }
-    Notes.OmatateService { id: service; panel: root; onWarning: message => console.error("WARNING", message) }
+    Notes.OmatateService { id: service; host: root; onWarning: message => console.error("WARNING", message) }
     Timer {
         interval: 50; running: true
         onTriggered: {

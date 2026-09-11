@@ -13,7 +13,13 @@ const execute = promisify(execFile)
 
 async function fixture(t) {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(),'omatate-service-'))
-    t.after(() => fs.rm(dir,{recursive:true,force:true}))
+    t.after(async () => {
+        // Finish any analysis job the test left running so its poll loop ends before the files go away.
+        const workers=dir+'/runtime/omatate/workers'
+        for (const name of await fs.readdir(workers).catch(()=>[])) await fs.writeFile(workers+'/'+name+'/status','1\n',{flag:'wx'}).catch(()=>{})
+        await new Promise(r=>setTimeout(r,100))
+        await fs.rm(dir,{recursive:true,force:true})
+    })
     const environment = {HOME:dir,XDG_RUNTIME_DIR:dir+'/runtime',XDG_CONFIG_HOME:dir+'/.config',XDG_STATE_HOME:dir+'/.local/state'}
     await fs.mkdir(environment.XDG_RUNTIME_DIR)
     const warnings=[], panels=[]
@@ -63,6 +69,13 @@ test('keyboard config accepts overrides, comments and multiline arrays',()=>{
 test('Ghostty palette preserves terminal typography and alpha',()=>{
     const theme=Theme.resolve('', '', 'background = #111111\nforeground = #eeeeee\nfont-family = Example\nfont-size = 13\nselection-background = #aabbcc88\npalette = 4=#55aaff', '')
     assert.equal(theme.fontPointSize,13);assert.equal(theme.smallPointSize,13);assert.equal(theme.accent,'#55aaff');assert.equal(theme.selectionBg,'#88aabbcc')
+})
+test('Omarchy accent survives a different Ghostty blue',()=>{
+    const palette='background = "#05182e"\nforeground = "#f6dcac"\naccent = "#faa968"'
+    const terminal='background = #05182e\nforeground = #f6dcac\npalette = 4=#3f8f8a'
+    const theme=Theme.resolve(palette,'',terminal,'')
+    assert.equal(theme.accent,'#faa968')
+    assert.equal(theme.background,'#05182e')
 })
 test('new project, concurrent saves, sections, deletion and restart',async t=>{
     const f=await fixture(t);await f.service.command(['open-project',f.project])
@@ -169,6 +182,19 @@ test('save receipt prevents duplicate draft recovery after interrupted cleanup',
     await restarted.request('draft',{...f.owner(),text:'Only once'})
     assert.equal((await restarted.request('snapshot',{})).draft,'Only once')
 })
+test('a failed draft save keeps the receipt that suppresses duplicate recovery',async t=>{
+    const f=await fixture(t);await f.service.command(['open-project',f.project]);await f.service.request('draft',{...f.owner(),text:'Only once'})
+    let insertionWritten=false
+    f.fail((file,text)=>{
+        if(file.endsWith('/entries.jsonl')&&text.includes('Only once')) insertionWritten=true
+        return (file.endsWith('/draft.txt')&&text==='') || (insertionWritten&&file.endsWith('/entries.jsonl')&&text==='')
+    })
+    await f.service.request('note',{...f.owner(),text:'Only once'})
+    f.fail(file=>file.endsWith('/draft.txt'))
+    await assert.rejects(f.service.request('draft',{...f.owner(),text:'Replacement'}),/Injected/)
+    f.fail(null);const restarted=create(f.io,n=>f.environment[n]||'',f.hooks);await restarted.start()
+    assert.equal(restarted.snapshot().draft,'');assert.equal(restarted.snapshot().entries.length,1)
+})
 test('invalid command arity cannot create project files',async t=>{
     const f=await fixture(t)
     await assert.rejects(f.service.command(['create-project',f.dir,'mistake']),/Invalid arguments/)
@@ -186,8 +212,10 @@ test('corrupt registry is preserved while notes remain usable',async t=>{
     await restarted.command(['open-project',f.project]);assert.equal(await fs.readFile(registry,'utf8'),'broken')
 })
 
-test('AI capture uses read-only Codex, returns context, and survives a project switch',async t=>{
-    const f=await fixture(t);await f.service.command(['open-project',f.project]);await f.service.command(['ai','on']);f.focus();f.fast()
+// Starts an AI note with stubbed capture tools and finishes its transcription.
+// Returns the pending entry and the detached analysis command.
+async function startAnalysis(f) {
+    await f.service.command(['open-project',f.project]);await f.service.command(['ai','on']);f.focus();f.fast()
     let analysisArgs
     f.io.detach=args=>{if(args[3]==='omatate-analysis') analysisArgs=args}
     f.stub(async args=>{
@@ -196,29 +224,142 @@ test('AI capture uses read-only Codex, returns context, and survives a project s
         if(args[0]==='grim') {await fs.writeFile(args.at(-1),'fake png');return {code:0,stdout:'',stderr:''}}
     })
     await f.service.command(['ptt','start'])
-    assert.ok(analysisArgs.includes('read-only'));assert.ok(analysisArgs.includes('codex'))
     const pending=f.state.entries[0]
-    // Complete transcription so selecting another project is allowed while AI runs.
     await fs.writeFile(f.project+'/.data/transcripts/001.txt','Spoken note')
     await fs.mkdir(f.environment.XDG_RUNTIME_DIR+'/voxtype',{recursive:true});await fs.writeFile(f.environment.XDG_RUNTIME_DIR+'/voxtype/state','idle')
     await f.service.command(['ptt','stop'])
     for(let i=0;i<100&&f.state.entries[0].status!=='done';i++) await new Promise(r=>setTimeout(r,10))
+    return {pending,analysisArgs}
+}
+async function fileWhen(file) {
+    for(let i=0;i<200;i++) {try {return await fs.readFile(file,'utf8')} catch(error) {if(error.code!=='ENOENT') throw error;await new Promise(r=>setTimeout(r,10))}}
+    return fs.readFile(file,'utf8')
+}
+async function warningWhen(f,text) {
+    for(let i=0;i<200&&!f.warnings.some(w=>w.includes(text));i++) await new Promise(r=>setTimeout(r,10))
+    return f.warnings.some(w=>w.includes(text))
+}
+async function entriesWhen(f,done) {
+    let entries
+    for(let i=0;i<200;i++) {entries=Notes.parseEntries(await fs.readFile(f.project+'/.data/entries.jsonl','utf8'));if(done(entries)) break;await new Promise(r=>setTimeout(r,10))}
+    return entries
+}
+// Runs the real detached wrapper with a fake analysis command in place of codex,
+// against a job directory the service is not following.
+let isolated=0
+async function isolatedJob(f) {
+    const dir=f.environment.XDG_RUNTIME_DIR+'/omatate/workers/job-isolated'+(++isolated)
+    await fs.mkdir(dir,{recursive:true,mode:0o700});return {dir,output:dir+'/output.json',status:dir+'/status',log:dir+'/log'}
+}
+function runWrapper(analysisArgs,command,job) {
+    const [sh,flag,script,name,root,,input]=analysisArgs
+    return execute(sh,[flag,script,name,root,path.basename(job.dir),input,'sh','-c',command]).then(()=>0,error=>error.code)
+}
+
+test('AI capture uses read-only Codex, returns context, and survives a project switch',async t=>{
+    const f=await fixture(t);const {pending,analysisArgs}=await startAnalysis(f)
+    assert.ok(analysisArgs.includes('read-only'));assert.ok(analysisArgs.includes('codex'))
     const other=f.dir+'/other';await fs.mkdir(other);await f.service.command(['select-project',other,f.project])
     const context={title:'Test screen',summary:'A form',regions:[],notable:[]}
+    await fs.writeFile(pending.analysis.log,'codex said hi\n')
     await fs.writeFile(pending.analysis.output,JSON.stringify(context));await fs.writeFile(pending.analysis.status,'0\n')
-    let entries
-    for(let i=0;i<100;i++) {entries=Notes.parseEntries(await fs.readFile(f.project+'/.data/entries.jsonl','utf8'));if(entries[0].context_status==='done') break;await new Promise(r=>setTimeout(r,10))}
+    const entries=await entriesWhen(f,e=>e[0].context_status==='done')
     assert.deepEqual(entries[0].context,context);assert.equal(entries[0].transcript,'Spoken note')
     assert.equal(f.state.session,other);assert.equal(f.state.entries.length,0)
+    assert.equal(await fileWhen(f.project+'/.data/logs/analyze-001.log'),'codex said hi\n')
+    for(let i=0;i<100;i++) {try {await fs.stat(pending.analysis.dir)} catch(error) {break} await new Promise(r=>setTimeout(r,10))}
+    await assert.rejects(fs.stat(pending.analysis.dir),'the private job directory is removed after publication')
+})
+test('detached analysis only writes inside its private runtime job directory',async t=>{
+    const f=await fixture(t);const {pending,analysisArgs}=await startAnalysis(f)
+    const workers=f.environment.XDG_RUNTIME_DIR+'/omatate/workers/'
+    assert.match(pending.analysis.dir,new RegExp('^'+workers.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'job-[A-Za-z0-9]+$'))
+    assert.equal((await fs.stat(pending.analysis.dir)).mode&0o777,0o700)
+    assert.ok(!analysisArgs.some(a=>a.includes(f.project)&&!a.startsWith('-C')&&a!==f.project),'the wrapper receives the project only as the codex -C argument')
+    assert.equal(analysisArgs.indexOf(f.project),analysisArgs.indexOf('-C')+1)
+    const job=await isolatedJob(f)
+    assert.equal(await runWrapper(analysisArgs,'cat >/dev/null; echo hello; echo oops >&2; exit 3',job),0)
+    assert.equal(await fs.readFile(job.log,'utf8'),'hello\noops\n');assert.equal(await fs.readFile(job.status,'utf8'),'3\n')
+    assert.deepEqual((await fs.readdir(job.dir)).sort(),['log','status'],'no predictable temporary name is left behind')
+    assert.equal(await runWrapper(analysisArgs,'exit 0',pending.analysis),0)
+    const entries=await entriesWhen(f,e=>e[0].context_status==='error')
+    assert.equal(entries[0].context_status,'error');assert.ok(await warningWhen(f,'Analysis failed'))
+    assert.equal(await fileWhen(f.project+'/.data/logs/analyze-001.log'),'')
+    assert.equal((await fs.stat(f.project+'/.data/logs/analyze-001.log')).mode&0o777,0o600)
+})
+test('detached analysis refuses symlinked log and status targets',async t=>{
+    const f=await fixture(t);const {analysisArgs}=await startAnalysis(f);const job=await isolatedJob(f)
+    const victimLog=f.dir+'/victim-log',victimStatus=f.dir+'/victim-status'
+    await fs.writeFile(victimLog,'keep');await fs.writeFile(victimStatus,'keep')
+    await fs.symlink(victimLog,job.log);await fs.symlink(victimStatus,job.status)
+    await runWrapper(analysisArgs,'exit 0',job)
+    assert.equal(await fs.readFile(victimLog,'utf8'),'keep');assert.equal(await fs.readFile(victimStatus,'utf8'),'keep')
+    assert.ok((await fs.lstat(job.status)).isFile(),'the status rename replaces the planted symlink instead of following it')
+    assert.ok((await fs.lstat(job.log)).isSymbolicLink());assert.notEqual(await fs.readFile(job.status,'utf8'),'0\n')
+    // A symlink to a directory at the status name is replaced, not entered.
+    const decoy=f.dir+'/decoy';await fs.mkdir(decoy);await fs.rm(job.status);await fs.symlink(decoy,job.status)
+    await fs.rm(job.log);await runWrapper(analysisArgs,'exit 0',job)
+    assert.deepEqual(await fs.readdir(decoy),[]);assert.ok((await fs.lstat(job.status)).isFile());assert.equal(await fs.readFile(job.status,'utf8'),'0\n')
+    // A symlink planted at the job directory name itself is rejected by the pwd -P check.
+    const planted=f.dir+'/planted';await fs.mkdir(planted)
+    await fs.rm(job.dir,{recursive:true});await fs.symlink(planted,job.dir)
+    assert.equal(await runWrapper(analysisArgs,'echo escaped > escaped',job),1)
+    assert.deepEqual(await fs.readdir(planted),[])
+})
+test('analysis log publication never follows symlinks in the project',async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    const victim=f.dir+'/victim';await fs.writeFile(victim,'keep')
+    await fs.symlink(victim,f.project+'/.data/logs/analyze-001.log')
+    await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,'1\n')
+    await entriesWhen(f,e=>e[0].context_status==='error')
+    for(let i=0;i<100&&(await fs.lstat(f.project+'/.data/logs/analyze-001.log')).isSymbolicLink();i++) await new Promise(r=>setTimeout(r,10))
+    assert.equal(await fs.readFile(victim,'utf8'),'keep')
+    assert.ok((await fs.lstat(f.project+'/.data/logs/analyze-001.log')).isFile())
+    assert.equal(await fs.readFile(f.project+'/.data/logs/analyze-001.log','utf8'),'log text\n')
+    assert.deepEqual((await fs.readdir(f.project+'/.data/logs')).filter(n=>n.startsWith('.publish')),[])
+})
+test('analysis log publication refuses a symlinked log directory and a changed project identity',async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    const outside=f.dir+'/outside';await fs.mkdir(outside)
+    await fs.rm(f.project+'/.data/logs',{recursive:true});await fs.symlink(outside,f.project+'/.data/logs')
+    await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,'1\n')
+    await entriesWhen(f,e=>e[0].context_status==='error')
+    assert.ok(await warningWhen(f,'Cannot save the analysis log'));assert.deepEqual(await fs.readdir(outside),[])
+})
+test('analysis context publication refuses a symlinked context directory',async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    const outside=f.dir+'/outside';await fs.mkdir(outside)
+    await fs.rm(f.project+'/.data/context',{recursive:true});await fs.symlink(outside,f.project+'/.data/context')
+    await fs.writeFile(pending.analysis.output,JSON.stringify({title:'T',summary:'S',regions:[],notable:[]}));await fs.writeFile(pending.analysis.status,'0\n')
+    const entries=await entriesWhen(f,e=>e[0].context_status!=='pending')
+    assert.equal(entries[0].context_status,'error');assert.equal(entries[0].context,undefined);assert.deepEqual(await fs.readdir(outside),[])
+    assert.ok(await warningWhen(f,'Analysis failed'))
+})
+test('analysis publication verifies .data before creating a missing target directory',async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    // .data is swapped for a symlink after the project was opened; its token still matches.
+    const outside=f.dir+'/outside';await fs.rename(f.project+'/.data',outside);await fs.symlink(outside,f.project+'/.data')
+    await fs.rm(outside+'/logs',{recursive:true})
+    await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,'1\n')
+    assert.ok(await warningWhen(f,'Cannot save the analysis log'));await assert.rejects(fs.stat(outside+'/logs'))
+})
+test('analysis log publication re-reads the project identity right before renaming',async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    // Change the project identity after the service's own check but before the publish script runs.
+    const previous=f.io.run
+    f.io.run=async(args,options)=>{if(args[3]==='omatate-publish') await fs.writeFile(f.project+'/.data/id','replaced\n');return previous(args,options)}
+    await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,'1\n')
+    assert.ok(await warningWhen(f,'Cannot save the analysis log'))
+    assert.deepEqual(await fs.readdir(f.project+'/.data/logs'),[])
 })
 test('shell restart reconnects to analysis completion files',async t=>{
     const f=await fixture(t);await f.service.command(['open-project',f.project])
-    const output=f.environment.XDG_RUNTIME_DIR+'/omatate/workers/resumed.json'
-    await fs.mkdir(path.dirname(output),{recursive:true})
+    const dir=f.environment.XDG_RUNTIME_DIR+'/omatate/workers/job-resumed'
+    await fs.mkdir(dir,{recursive:true})
     const context={title:'Recovered',summary:'Completed during reload',regions:[],notable:[]}
     const entry={id:1,ts:Notes.timestamp(),status:'done',transcript:'Preserved',context_status:'pending',shot:f.environment.XDG_RUNTIME_DIR+'/omatate/shots/test.png',
-        analysis:{output,status:output+'.status',started:Date.now()}}
-    await fs.writeFile(f.project+'/.data/entries.jsonl',Notes.encodeEntries([entry]));await fs.writeFile(output,JSON.stringify(context));await fs.writeFile(output+'.status','0\n')
+        analysis:{dir,output:dir+'/output.json',status:dir+'/status',log:dir+'/log',started:Date.now()}}
+    await fs.writeFile(f.project+'/.data/entries.jsonl',Notes.encodeEntries([entry]));await fs.writeFile(dir+'/output.json',JSON.stringify(context));await fs.writeFile(dir+'/status','0\n')
     const restarted=create(f.io,n=>f.environment[n]||'',f.hooks);await restarted.start()
     for(let i=0;i<100&&restarted.snapshot().entries[0].context_status!=='done';i++) await new Promise(r=>setTimeout(r,10))
     assert.deepEqual(restarted.snapshot().entries[0].context,context)

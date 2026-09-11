@@ -8,7 +8,7 @@ and scales the 24-unit drawing area to 14 logical pixels with a 1.5-pixel stroke
 The icon colors follow the current app theme.
 
 Source files: search.svg, folder.svg, scan.svg, sparkles.svg, plus.svg,
-chevron-up.svg, chevron-down.svg, chevron-left.svg, chevron-right.svg, x.svg.
+chevron-up.svg, chevron-down.svg, x.svg.
 
 The included LICENSE is copied from:
 https://raw.githubusercontent.com/lucide-icons/lucide/main/LICENSE

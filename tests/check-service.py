@@ -21,6 +21,7 @@ ShellRoot {
     property bool opened: false
     property var owner: ({})
     property string base: Quickshell.env("OMATATE_TEST_ROOT")
+    property string large: "λ line of text that repeats until the write no longer fits one pipe buffer\n".repeat(20000)
     function servicePanel(command) { return Promise.resolve({ok:true}) }
     function noteFocused() { return false }
     function require(value, message) { if (!value) throw new Error(message) }
@@ -55,7 +56,18 @@ ShellRoot {
                 root.require(result.code !== 0, "Missing command returned success")
                 return files.write(root.base + "/empty", "")
             }).then(() => files.read(root.base + "/empty"))
-            .then(function(text) { root.require(text === "", "Empty file write failed"); console.log("SERVICE_OK"); Qt.quit() })
+            .then(function(text) {
+                root.require(text === "", "Empty file write failed")
+                // A symlink planted at a write target is replaced, never followed.
+                return files.run(["sh", "-c", "printf keep > \\"$1/victim\\" && ln -s \\"$1/victim\\" \\"$1/link\\" && ln -s \\"$1/missing\\" \\"$1/dangling\\"", "test", root.base])
+            }).then(() => files.write(root.base + "/link", "changed"))
+            .then(() => files.write(root.base + "/dangling", "created"))
+            .then(() => files.write(root.base + "/large", root.large))
+            .then(() => files.read(root.base + "/large"))
+            .then(function(text) {
+                root.require(text === root.large, "Large write was truncated or altered")
+                console.log("SERVICE_OK"); Qt.quit()
+            })
             .catch(function(error) { console.error("SERVICE_FAIL", error.message); Qt.quit() })
         }
     }
@@ -76,4 +88,10 @@ ShellRoot {
         raise SystemExit(result.stdout)
     assert (root / "project/.data/draft.txt").read_text() == "Keep this draft"
     assert "Updated" in (root / "project/notes.md").read_text()
+    assert (root / "victim").read_text() == "keep", "write followed a symlink"
+    assert not (root / "link").is_symlink() and (root / "link").read_text() == "changed"
+    assert not (root / "dangling").is_symlink() and (root / "dangling").read_text() == "created"
+    mask = os.umask(0); os.umask(mask)
+    assert (root / "dangling").stat().st_mode & 0o777 == 0o666 & ~mask, "new file mode does not follow the umask"
+    assert not [n for n in os.listdir(root) if ".XXXXXX" in n or n.startswith(("link.", "dangling.", "large."))], "stage directory left behind"
     print("Quickshell service integration passed")

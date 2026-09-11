@@ -1,7 +1,8 @@
 import QtQuick
 import Quickshell.Io
 
-// All file jobs are asynchronous. Each job owns its FileView until completion.
+// All file jobs are asynchronous. Reads own a FileView until completion;
+// writes and commands own a Process.
 Item {
     id: root
     function read(path, optional) {
@@ -11,15 +12,18 @@ Item {
         })
     }
     function write(path, text) {
-        // FileView.setText("") is a no-op on a fresh FileView. Use an empty
-        // sibling temporary file so clears still replace the target atomically.
-        if (text === "") return run(["sh", "-c",
-            "set -eu; target=$1; [ ! -e \"$target\" ] || [ -f \"$target\" ]; tmp=$(mktemp \"${target}.XXXXXX\"); trap 'rm -f -- \"$tmp\"' EXIT; if [ -f \"$target\" ]; then chmod --reference=\"$target\" \"$tmp\"; fi; sync -d \"$tmp\"; mv -fT -- \"$tmp\" \"$target\"",
-            "omatate-empty-file", path]).then(function() {})
-        return new Promise(function(resolve, reject) {
-            var job = writer.createObject(root, {resolveJob: resolve, rejectJob: reject, path: path, expectedText: text})
-            job.setText(text)
-        })
+        // Every write goes through a shell script rather than FileView, whose
+        // atomic save resolves a symlink at the target and writes the file it
+        // points to. The project directory is user controlled, so a planted
+        // link at draft.txt or entries.jsonl would redirect the save. Here the
+        // text lands in a private mktemp directory next to the target under
+        // noclobber, so the open is an exclusive create, and mv -fT renames it
+        // over the target name, replacing a link instead of following it.
+        return run(["sh", "-c",
+            "set -Ceu; target=$1; [ ! -e \"$target\" ] || [ -f \"$target\" ]; stage=$(mktemp -d \"${target}.XXXXXX\"); trap 'rm -rf -- \"$stage\"' EXIT; "
+            + "cat > \"$stage/file\"; if [ -f \"$target\" ]; then chmod --reference=\"$target\" \"$stage/file\"; else chmod \"$(printf '%o' \"$((0666 & ~0$(umask)))\")\" \"$stage/file\"; fi; "
+            + "sync -d \"$stage/file\"; mv -fT -- \"$stage/file\" \"$target\"",
+            "omatate-write", path], {input: text}).then(function() {})
     }
     function run(args, options) {
         options = options || {}
@@ -48,29 +52,6 @@ Item {
                 else rejectJob(new Error("Cannot read " + path + " (file error " + error + ")"))
                 destroy()
             }
-        }
-    }
-    Component {
-        id: writer
-        FileView {
-            property var resolveJob
-            property var rejectJob
-            property string expectedText: ""
-            preload: false
-            atomicWrites: true
-            blockWrites: false
-            printErrors: false
-            onSaved: {
-                var resolve = resolveJob, reject = rejectJob, expected = expectedText
-                // Verify the on-disk result, including a failed atomic rename
-                // reported only as a warning by some FileView versions.
-                root.read(path, false).then(function(actual) {
-                    if (actual === expected) resolve()
-                    else reject(new Error("Saved file did not match the requested contents"))
-                }, reject)
-                destroy()
-            }
-            onSaveFailed: error => { rejectJob(new Error("Cannot save " + path + " (file error " + error + ")")); destroy() }
         }
     }
     Component {

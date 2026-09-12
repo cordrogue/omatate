@@ -30,7 +30,12 @@ ShellRoot {
         target: "shell"
         function summon(id: string, payload: string): string { plugin.open(payload); return "ok" }
         function hide(id: string): string { plugin.close(); return "ok" }
-        function state(): string { var p=plugin.panel; return JSON.stringify({ready:plugin.ready,session:p?p.session:"",entries:p?p.entries:[],error:p?(p.hasError?p.status:""):(plugin.hasError?plugin.status:""),opened:plugin.opened}) }
+        function state(): string { var p=plugin.panel; var chooser=assertions.findChild(plugin,"omatate-projects"); return JSON.stringify({ready:plugin.ready,session:p?p.session:"",entries:p?p.entries:[],error:p?(p.hasError?p.status:""):(plugin.hasError?plugin.status:""),opened:plugin.opened,chooser:chooser?chooser.backingWindowVisible:null,choosing:p?p.choosing:false}) }
+        function projects(): void { plugin.panel.runAction("projects") }
+        function escapeChooser(): void { plugin.panel.escapePanel() }
+        function minimize(): void { plugin.panel.runAction("minimize") }
+        function panelHide(): void { plugin.servicePanel("hide") }
+        function panelShow(): void { plugin.servicePanel("show") }
         function note(text: string): void {
             var field=assertions.findChild(plugin,"omatate-draft")
             if (!field) throw new Error("Draft field not found")
@@ -58,6 +63,14 @@ ShellRoot {
         if result.returncode:
             raise AssertionError(f"CLI {args}: {result.stderr} {result.stdout}")
         return result.stdout.strip()
+    def wait_for(pred):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = json.loads(ipc("state"))
+            if pred(state):
+                return state
+            time.sleep(.05)
+        raise AssertionError(f"Timed out waiting for panel state: {state}")
     with (root / "log").open("w+") as log:
         process = subprocess.Popen(["qs", "-p", str(root / "shell.qml"), "--no-color"], env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -71,7 +84,31 @@ ShellRoot {
                 time.sleep(.05)
             else: raise AssertionError("Panel did not become ready")
             project=str(root / "project with spaces")
+            cli("open")
+            wait_for(lambda state: state["chooser"] is True and state["session"] == "")
+            ipc("projects")
+            wait_for(lambda state: state["chooser"] is False)
+            ipc("projects")
+            wait_for(lambda state: state["chooser"] is True)
+            ipc("escapeChooser")
+            wait_for(lambda state: state["chooser"] is False and state["choosing"] is False)
+            ipc("projects")
+            wait_for(lambda state: state["chooser"] is True)
+            ipc("minimize")
+            wait_for(lambda state: state["chooser"] is False)
+            ipc("minimize")
+            wait_for(lambda state: state["chooser"] is True)
+            # A capture bracket hides then shows the panel; the chooser must not survive it.
+            ipc("panelHide")
+            wait_for(lambda state: state["chooser"] is False)
+            ipc("panelShow")
+            time.sleep(.3)
+            state=json.loads(ipc("state"))
+            assert state["chooser"] is False and state["choosing"] is False, state
+            ipc("projects")
+            wait_for(lambda state: state["chooser"] is True)
             assert cli("open-project",project)==project
+            wait_for(lambda state: state["chooser"] is False and state["session"] == project)
             text="A QML note with literal $() and 'quotes' λ"
             ipc("note",text)
             for _ in range(100):
@@ -99,6 +136,11 @@ ShellRoot {
             cli("stop")
             assert not json.loads(ipc("state"))["opened"]
             assert text in (root / "project with spaces/notes.md").read_text()
+            log.flush()
+            log.seek(0)
+            output = log.read()
+            for warning in ["Failed to create grabbing popup", "Binding loop detected", "not an xdg_popup"]:
+                assert warning not in output, output
             ipc("quit")
             process.wait(timeout=5)
         except BaseException:

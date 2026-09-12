@@ -27,8 +27,13 @@ export function create(io, env, hooks) {
     function owner() { return {session:state.session, token:state.token} }
     function checkOwner(expected) {
         if (!expected.session || !expected.token) return Promise.reject(new Error('Inactive project'))
-        return io.read(expected.session + '/.data/id').then(function(id) {
-            if (id.trim() !== expected.token) throw new Error('Project identity changed; refusing a stale write')
+        // Read the token from the verified directory, including when handling
+        // failed analysis publication. A matching token behind a symlink does
+        // not authorize a completion write through that symlink.
+        return run(['sh', '-c',
+            'set -eu; cd -- "$1"; [ "$(pwd -P)" = "$1" ] || { printf "%s\\n" "Project directory changed; refusing a stale write" >&2; exit 1; }; cat -- id',
+            'omatate-owner', expected.session + '/.data']).then(function(result) {
+            if (result.stdout.trim() !== expected.token) throw new Error('Project identity changed; refusing a stale write')
         })
     }
     function checkActive(expected) {

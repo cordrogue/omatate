@@ -38,6 +38,10 @@ recovery if the shell exits between those steps. A Markdown failure after saving
 reports a warning without reporting the note as unsaved. The UI retains pending
 edits when a write fails. Project switches drain editor saves first.
 
+Writes reject symlinked parent directories and replace a symlink at the target
+filename without following it. Ownership checks also reject a symlinked `.data/`
+directory, so a failed analysis publication cannot rewrite records through it.
+
 Filesystem arguments and user text are passed as separate process arguments or
 through stdin. They are never interpolated into shell command source. Paths for
 project operations must resolve to directories. Relocation rejects occupied
@@ -88,5 +92,6 @@ conflicting shortcuts, unsupported syntax, and reserved typing/navigation keys
 fall back to default bindings with a warning.
 
 Theme resolution uses Ghostty's effective configuration, then Omarchy theme
-colors and font. Theme file changes trigger asynchronous refreshes. Slow tools
+colors and font. An explicit Omarchy accent takes precedence over Ghostty's
+ANSI blue and supplies icon colors. Theme file changes trigger asynchronous refreshes. Slow tools
 have bounded execution time and do not block the UI thread.

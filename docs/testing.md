@@ -38,9 +38,9 @@ Run the panel and command launcher integration check on a Wayland desktop:
 python3 tests/check-panel.py
 ```
 
-It briefly opens the real panel with temporary projects and checks note
-submission, CLI arguments, project switching, and session closure. It uses
-an isolated shell instance and does not change your installed plugin.
+It briefly opens the real panel with temporary projects and checks the project
+chooser, note submission, CLI arguments, project switching, and session closure.
+It uses an isolated shell instance and does not change your installed plugin.
 
 Measure what the plugin costs the shell at startup on a Wayland desktop:
 

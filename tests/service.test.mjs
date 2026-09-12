@@ -343,6 +343,18 @@ test('analysis publication verifies .data before creating a missing target direc
     await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,'1\n')
     assert.ok(await warningWhen(f,'Cannot save the analysis log'));await assert.rejects(fs.stat(outside+'/logs'))
 })
+for (const status of ['0', '1']) test('analysis completion preserves records after .data becomes a symlink, status '+status,async t=>{
+    const f=await fixture(t);const {pending}=await startAnalysis(f)
+    const outside=f.dir+'/outside';await fs.rename(f.project+'/.data',outside);await fs.symlink(outside,f.project+'/.data')
+    const before=await fs.readFile(outside+'/entries.jsonl','utf8')
+    await fs.writeFile(pending.analysis.output,JSON.stringify({title:'T',summary:'S',regions:[],notable:[]}))
+    await fs.writeFile(pending.analysis.log,'log text\n');await fs.writeFile(pending.analysis.status,status+'\n')
+    const refused=await warningWhen(f,'Project directory changed')
+    assert.equal(await fs.readFile(outside+'/entries.jsonl','utf8'),before,'completion must not rewrite records through the rejected directory')
+    assert.ok(refused,'completion reports the invalid project directory')
+    assert.deepEqual(await fs.readdir(outside+'/context'),[])
+    assert.deepEqual(await fs.readdir(outside+'/logs'),[])
+})
 test('analysis log publication re-reads the project identity right before renaming',async t=>{
     const f=await fixture(t);const {pending}=await startAnalysis(f)
     // Change the project identity after the service's own check but before the publish script runs.

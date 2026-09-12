@@ -25,6 +25,9 @@ ShellRoot {
     function servicePanel(command) { return Promise.resolve({ok:true}) }
     function noteFocused() { return false }
     function require(value, message) { if (!value) throw new Error(message) }
+    function rejectWrite(path, text) {
+        return files.write(path, text).then(function() { throw new Error("Write followed a parent symlink: " + path) }, function() {})
+    }
     Notes.FileOps { id: files }
     Notes.OmatateService { id: service; host: root; onWarning: message => console.error("WARNING", message) }
     Timer {
@@ -66,6 +69,13 @@ ShellRoot {
             .then(() => files.read(root.base + "/large"))
             .then(function(text) {
                 root.require(text === root.large, "Large write was truncated or altered")
+                return files.run(["sh", "-c", 'mv -- "$1/project/.data" "$1/metadata" && ln -s -- "$1/metadata" "$1/project/.data" && ln -s -- "$1/project" "$1/project-link"', "test", root.base])
+            }).then(() => root.rejectWrite(root.base + "/project/.data/draft.txt", "redirected"))
+            .then(() => root.rejectWrite(root.base + "/project/.data/draft.txt", ""))
+            .then(() => root.rejectWrite(root.base + "/project-link/notes.md", "redirected"))
+            .then(() => service.request("draft", Object.assign({text:"redirected"}, root.owner))
+                .then(function() { throw new Error("Service accepted a symlinked metadata directory") }, function() {}))
+            .then(function() {
                 console.log("SERVICE_OK"); Qt.quit()
             })
             .catch(function(error) { console.error("SERVICE_FAIL", error.message); Qt.quit() })

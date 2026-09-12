@@ -242,7 +242,7 @@ Item {
             case "restyle": appearance.refresh(); resolve({ok:true}); break
             case "hide":
                 root.hiddenFocus = panel.contentItem.Window.active; root.shown = false; panelFocusGrab.active = false
-                root.previewAsset = ""; root.helping = false
+                root.previewAsset = ""; root.helping = false; root.choosing = false
                 // The service serializes panel commands, so one hide is pending at a time.
                 root.hideReply = function(reply) { if (reply.ok) resolve(reply); else reject(new Error(reply.error)) }
                 root.hideRetries = 0; hideTimer.restart(); break
@@ -252,7 +252,7 @@ Item {
                 else releaseTimer.restart()
                 resolve({ok:true}); break
             case "toggle-focus":
-                if (panel.contentItem.Window.active && root.shown) { root.focusAllowed = false; panelFocusGrab.active = false; root.helping = false; root.previewAsset = ""; releaseTimer.restart() }
+                if (panel.contentItem.Window.active && root.shown) { root.focusAllowed = false; panelFocusGrab.active = false; root.helping = false; root.previewAsset = ""; root.choosing = false; releaseTimer.restart() }
                 else root.takeFocus()
                 resolve({ok:true}); break
             case "quit":
@@ -273,7 +273,7 @@ Item {
             else { panelFocusGrab.active = false; shown = false; previewAsset = ""; helping = false; closed() }
         })
     }
-    function chooseFolder(create) { if (busy) return; newFolder = create; folderDialog.title = create ? "Choose a parent for the new project" : "Choose a project folder"; folderDialog.open() }
+    function chooseFolder(create) { if (busy) return; choosing = false; newFolder = create; folderDialog.title = create ? "Choose a parent for the new project" : "Choose a project folder"; folderDialog.open() }
     function selectProject(path) {
         actionCommand(["select-project", path, session], function(ok) { if (ok) { choosing = false; focusNote() } })
     }
@@ -361,7 +361,7 @@ Item {
         if (helping) helping = false
         else if (previewAsset) previewAsset = ""
         else if (searching) { searching = false; search.text = ""; focusNote() }
-        else if (choosing && session) { choosing = false; focusNote() }
+        else if (choosing) { choosing = false; if (session) focusNote(); else projectButton.forceActiveFocus() }
         else focusNote()
     }
 
@@ -397,7 +397,7 @@ Item {
         id: hideTimer
         interval: 48
         onTriggered: {
-            var visible = panel.backingWindowVisible || previewWindow.backingWindowVisible || helpWindow.backingWindowVisible
+            var visible = panel.backingWindowVisible || projectWindow.backingWindowVisible || previewWindow.backingWindowVisible || helpWindow.backingWindowVisible
             if (visible && ++root.hideRetries * interval < 1200) { restart(); return }
             var reply = root.hideReply; root.hideReply = null
             if (reply) reply(visible ? {ok:false, error:"panel did not hide"} : {ok:true})
@@ -667,50 +667,6 @@ Item {
                 Text { id: draftStatus; anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: 5; rightMargin: 5; topMargin: 3 } text: root.status; wrapMode: Text.Wrap; color: root.theme.muted; font.family: root.theme.fontFamily; font.pointSize: root.theme.smallPointSize }
             }
         }
-        QQC.Popup {
-            id: projectPopup
-            popupType: QQC.Popup.Window
-            parent: panel.contentItem
-            x: panel.width - width
-            y: toolbar.height
-            width: Math.max(276, panel.width)
-            padding: 3
-            opacity: root.panelOpacity
-            visible: root.choosing && root.shown && !root.minimized
-            closePolicy: QQC.Popup.CloseOnEscape | QQC.Popup.CloseOnPressOutside
-            onClosed: root.choosing = false
-            background: Rectangle { color: root.theme.background; border.width: 1; border.color: root.theme.hair }
-            component ProjectChoice: NoteButton {
-                theme: root.theme
-                Layout.fillWidth: true
-                leftPadding: 8
-                rightPadding: 8
-                topPadding: 2
-                bottomPadding: 2
-                implicitHeight: Math.max(28, implicitContentHeight + 4)
-                background: Rectangle { color: parent.selected ? root.theme.selectionBg : (parent.hovered ? root.withAlpha(root.theme.foreground, 0.08) : "transparent") }
-                contentItem: Text { text: parent.text; color: parent.selected ? root.theme.selectionFg : parent.textColor; font: parent.font; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter }
-            }
-            contentItem: ColumnLayout {
-                spacing: 0
-                ProjectChoice { text: "Choose project"; textColor: root.theme.foreground; selected: !root.session; onClicked: root.choosing = false }
-                Repeater {
-                    model: root.projects
-                    ProjectChoice {
-                        required property string modelData
-                        text: root.projectLabel(modelData)
-                        textColor: root.theme.foreground
-                        tooltipText: modelData
-                        selected: root.session === modelData
-                        enabled: !root.busy
-                        onClicked: root.selectProject(modelData)
-                    }
-                }
-                ProjectChoice { text: "New project"; textColor: root.theme.accent; onClicked: { root.choosing = false; root.chooseFolder(true) } }
-                ProjectChoice { text: "Use existing folder"; textColor: root.theme.accent; onClicked: { root.choosing = false; root.chooseFolder(false) } }
-            }
-        }
-
         Instantiator {
             model: root.actions
             delegate: Shortcut {
@@ -742,6 +698,61 @@ Item {
                 Item { Layout.fillWidth: true }
                 NoteButton { theme: root.theme; text: "Cancel"; onClicked: newProjectDialog.reject() }
                 NoteButton { theme: root.theme; text: "Create"; enabled: !!projectName.text.trim(); onClicked: newProjectDialog.accept() }
+            }
+        }
+    }
+    PanelWindow {
+        id: projectWindow
+        objectName: "omatate-projects"
+        property int padding: 3
+        visible: root.choosing && root.shown && !root.minimized
+        screen: panel.screen
+        anchors { top: true; right: true }
+        margins { top: root.topGap + toolbar.height; right: root.rightGap }
+        implicitWidth: Math.min(Math.max(276, panel.width), Math.max(1, (screen ? screen.width : 1400) - root.rightGap - 12))
+        implicitHeight: choices.implicitHeight + 2 * padding + 2
+        color: "transparent"
+        exclusionMode: ExclusionMode.Ignore
+        WlrLayershell.namespace: "omatate"
+        WlrLayershell.layer: root.screensaverVisible ? WlrLayer.Top : WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+        contentItem.opacity: root.panelOpacity
+        component ProjectChoice: NoteButton {
+            theme: root.theme
+            Layout.fillWidth: true
+            leftPadding: 8
+            rightPadding: 8
+            topPadding: 2
+            bottomPadding: 2
+            implicitHeight: Math.max(28, implicitContentHeight + 4)
+            background: Rectangle { color: parent.selected ? root.theme.selectionBg : (parent.hovered ? root.withAlpha(root.theme.foreground, 0.08) : "transparent") }
+            contentItem: Text { text: parent.text; color: parent.selected ? root.theme.selectionFg : parent.textColor; font: parent.font; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter }
+        }
+        Rectangle {
+            anchors.fill: parent
+            color: root.theme.background
+            border.width: 1
+            border.color: root.theme.hair
+            ColumnLayout {
+                id: choices
+                anchors.fill: parent
+                anchors.margins: projectWindow.padding + 1
+                spacing: 0
+                ProjectChoice { text: "Choose project"; textColor: root.theme.foreground; selected: !root.session; onClicked: root.choosing = false }
+                Repeater {
+                    model: root.projects
+                    ProjectChoice {
+                        required property string modelData
+                        text: root.projectLabel(modelData)
+                        textColor: root.theme.foreground
+                        tooltipText: modelData
+                        selected: root.session === modelData
+                        enabled: !root.busy
+                        onClicked: root.selectProject(modelData)
+                    }
+                }
+                ProjectChoice { text: "New project"; textColor: root.theme.accent; onClicked: { root.choosing = false; root.chooseFolder(true) } }
+                ProjectChoice { text: "Use existing folder"; textColor: root.theme.accent; onClicked: { root.choosing = false; root.chooseFolder(false) } }
             }
         }
     }

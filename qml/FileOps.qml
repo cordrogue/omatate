@@ -16,11 +16,14 @@ Item {
         // atomic save resolves a symlink at the target and writes the file it
         // points to. The project directory is user controlled, so a planted
         // link at draft.txt or entries.jsonl would redirect the save. Here the
-        // text lands in a private mktemp directory next to the target under
-        // noclobber, so the open is an exclusive create, and mv -fT renames it
-        // over the target name, replacing a link instead of following it.
+        // parent directory is entered and checked before any writes. All later
+        // paths are relative to that directory so replacing an ancestor with a
+        // symlink cannot redirect staging or publication. The exclusive create
+        // and mv -fT also protect the final filename.
         return run(["sh", "-c",
-            "set -Ceu; target=$1; [ ! -e \"$target\" ] || [ -f \"$target\" ]; stage=$(mktemp -d \"${target}.XXXXXX\"); trap 'rm -rf -- \"$stage\"' EXIT; "
+            "set -Ceu; target=$1; parent=${target%/*}; parent=${parent:-/}; cd -- \"$parent\"; "
+            + "[ \"$(pwd -P)\" = \"$parent\" ] || { printf '%s\\n' 'Refusing a write through a symlinked parent directory' >&2; exit 1; }; "
+            + "target=./${target##*/}; [ ! -e \"$target\" ] || [ -f \"$target\" ]; stage=$(mktemp -d \"${target}.XXXXXX\"); trap 'rm -rf -- \"$stage\"' EXIT; "
             + "cat > \"$stage/file\"; if [ -f \"$target\" ]; then chmod --reference=\"$target\" \"$stage/file\"; else chmod \"$(printf '%o' \"$((0666 & ~0$(umask)))\")\" \"$stage/file\"; fi; "
             + "sync -d \"$stage/file\"; mv -fT -- \"$stage/file\" \"$target\"",
             "omatate-write", path], {input: text}).then(function() {})
